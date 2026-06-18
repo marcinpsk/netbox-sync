@@ -54,6 +54,9 @@ class CheckRedfish(SourceBase):
         NBVLANGroup,
         NBPowerPort,
         NBInventoryItem,
+        NBModuleType,
+        NBModuleBay,
+        NBModule,
         NBCustomField
     ]
 
@@ -500,6 +503,8 @@ class CheckRedfish(SourceBase):
                 "description": description,
                 "manufacturer": get_string_or_none(grab(processor, "manufacturer")),
                 "full_name": name,
+                # the CPU model is the module type (catalog) identifier when modeling as modules
+                "model": model,
                 "serial": get_string_or_none(grab(processor, "serial")),
                 "health": health_status,
                 "size": size,
@@ -910,6 +915,24 @@ class CheckRedfish(SourceBase):
 
         self.update_all_items(items)
 
+    def use_modules(self) -> bool:
+        """
+        Decide if discovered hardware components should be modeled as NetBox modules
+        instead of the deprecated inventory items.
+
+        Modules are only used if explicitly enabled via config AND the connected NetBox
+        instance is recent enough to support the modules data model (>= 4.3).
+
+        Returns
+        -------
+        bool: True if components should be modeled as modules
+        """
+
+        if grab(self.settings, "model_components_as_modules", fallback=False) is not True:
+            return False
+
+        return version.parse(self.inventory.netbox_api_version) >= version.parse("4.3")
+
     def update_all_items(self, items):
         """
         Updates all inventory items of a certain type. Both (current and supplied list of items) will
@@ -930,6 +953,10 @@ class CheckRedfish(SourceBase):
 
         if len(items) == 0:
             return
+
+        # model components as NetBox modules instead of the deprecated inventory items
+        if self.use_modules() is True:
+            return self.update_all_modules(items)
 
         # get device
         inventory_type = grab(items, "0.inventory_type")
@@ -1049,6 +1076,204 @@ class CheckRedfish(SourceBase):
 
         return
 
+    def get_current_modules_by_bay_name(self, inventory_type: str) -> dict:
+        """
+        Collect all currently known modules of a certain component type for the current device,
+        keyed by the name of the module bay they are installed in.
+
+        Parameters
+        ----------
+        inventory_type: str
+            the component type to filter for (CPU, DIMM, Fan, ...)
+
+        Returns
+        -------
+        dict: module bay name -> NBModule, sorted by module bay name
+        """
+
+        current_modules = dict()
+        for module in self.inventory.get_all_items(NBModule):
+            if grab(module, "data.device") != self.device_object:
+                continue
+            if grab(module, "data.custom_fields.inventory_type") != inventory_type:
+                continue
+
+            bay_name = grab(module, "data.module_bay.data.name")
+            if bay_name is not None:
+                current_modules[bay_name] = module
+
+        return dict(sorted(current_modules.items()))
+
+    def update_all_modules(self, items):
+        """
+        Module based counterpart of 'update_all_items'. Updates all modules of a certain type.
+        Each component is represented by a module bay (the slot) holding a single module which is
+        typed by a module type (the catalog entry, e.g. the exact CPU/DIMM/NIC model).
+
+        Both (current and supplied list of items) will be sorted by the module bay name and
+        matched 1:1, exactly like 'update_all_items' does for inventory items.
+
+        Parameters
+        ----------
+        items: list
+            a list of items to update
+
+        Returns
+        -------
+        None
+        """
+
+        # get the component type of this batch of items (CPU, DIMM, Fan, ...)
+        inventory_type = grab(items, "0.inventory_type")
+
+        if inventory_type is None:
+            log.error(f"Unable to find inventory type for module item {items[0]}")
+            return
+
+        # get current modules for this device and type, keyed by their module bay name
+        current_modules = self.get_current_modules_by_bay_name(inventory_type)
+
+        # dict
+        #   key: NB module object
+        #   value: parsed data matching the exact module bay name
+        matched_modules = dict()
+        unmatched_module_items = list()
+
+        # try to match names to existing modules
+        for item in items:
+
+            current_module = current_modules.get(item.get("full_name"))
+            if current_module is not None:
+                matched_modules[current_module] = item
+            else:
+                unmatched_module_items.append(item)
+
+        # sort unmatched items by full_name
+        unmatched_module_items.sort(key=lambda x: x.get("full_name") or "")
+
+        # iterate over current NetBox modules
+        # if name did not match try to assign unmatched items in alphabetical order
+        for nb_module in current_modules.values():
+
+            if nb_module in matched_modules.keys():
+                continue
+
+            if len(unmatched_module_items) > 0:
+                matched_modules[nb_module] = unmatched_module_items.pop(0)
+
+            # set module health to absent if component can't be found in redfish inventory anymore
+            elif grab(nb_module, "data.custom_fields.health") != "Absent":
+                nb_module.update(data={"custom_fields": {"health": "Absent"}}, source=self)
+
+        # update modules with matching NetBox module
+        for module_object, module_data in matched_modules.items():
+            self.update_module(module_data, module_object)
+
+        # create new module in NetBox
+        for unmatched_module_item in unmatched_module_items:
+            self.update_module(unmatched_module_item)
+
+    def update_module(self, item_data: dict, module_object: NBModule = None):
+        """
+        Updates a single module with the supplied data. If no module is provided a new module bay,
+        module type and module will be created (see 'create_module').
+
+        Parameters
+        ----------
+        item_data: dict
+            a dict with data for the component to update
+        module_object: NBModule, None
+            the NetBox module to update.
+
+        Returns
+        -------
+        None
+        """
+
+        description = item_data.get("description")
+        if isinstance(description, list):
+            description = ", ".join(description)
+
+        # custom fields tracked on the module itself
+        module_custom_fields = {
+            "firmware": item_data.get("firmware"),
+            "health": item_data.get("health"),
+            "inventory_type": item_data.get("inventory_type"),
+            "inventory_size": item_data.get("size"),
+            "inventory_speed": item_data.get("speed")
+        }
+
+        # create a new module (incl. its module bay and module type)
+        if module_object is None:
+            self.create_module(item_data, description, module_custom_fields)
+            return
+
+        # update an existing module
+        module_data = {"custom_fields": module_custom_fields}
+        if item_data.get("serial") is not None:
+            module_data["serial"] = item_data.get("serial")
+        if description is not None and len(description) > 0:
+            module_data["description"] = description
+
+        module_object.update(data=module_data, source=self)
+
+    def create_module(self, item_data: dict, description: str, module_custom_fields: dict):
+        """
+        Create a new module for a discovered component. This creates (or reuses) the module type
+        (catalog entry), the module bay (the physical slot) and the module installed in that bay.
+
+        Parameters
+        ----------
+        item_data: dict
+            a dict with data for the component to create
+        description: str
+            the already compiled description string for this component
+        module_custom_fields: dict
+            the custom fields to store on the module
+        """
+
+        full_name = item_data.get("full_name")
+        manufacturer = item_data.get("manufacturer")
+        part_number = item_data.get("part_number")
+        serial = item_data.get("serial")
+        has_description = description is not None and len(description) > 0
+
+        # the module type model is the catalog identifier of the part (e.g. the exact CPU model)
+        module_type_data = {"model": item_data.get("model") or part_number or full_name}
+        if manufacturer is not None:
+            module_type_data["manufacturer"] = {"name": manufacturer}
+        if part_number is not None:
+            module_type_data["part_number"] = part_number
+
+        module_type = self.inventory.add_update_object(NBModuleType, data=module_type_data, source=self)
+
+        # the module bay represents the physical slot the component lives in
+        module_bay_data = {
+            "device": self.device_object,
+            "name": full_name
+        }
+        if item_data.get("label") is not None:
+            module_bay_data["label"] = item_data.get("label")
+        if has_description is True:
+            module_bay_data["description"] = description
+
+        module_bay = self.inventory.add_update_object(NBModuleBay, data=module_bay_data, source=self)
+
+        # the module is the actual installed component
+        module_data = {
+            "device": self.device_object,
+            "module_bay": module_bay,
+            "module_type": module_type,
+            "status": "active",
+            "custom_fields": module_custom_fields
+        }
+        if serial is not None:
+            module_data["serial"] = serial
+        if has_description is True:
+            module_data["description"] = description
+
+        self.inventory.add_object(NBModule, data=module_data, source=self)
+
     def add_necessary_base_objects(self):
         """
         Adds/updates source tag and all custom fields necessary for this source.
@@ -1059,6 +1284,10 @@ class CheckRedfish(SourceBase):
             "name": self.source_tag,
             "description": f"Marks objects synced from check_redfish inventory '{self.name}' to this NetBox Instance."
         })
+
+        # discovered components are stored either as modules (NetBox >= 4.3) or as the
+        # deprecated inventory items, so the related custom fields need to follow that choice
+        component_object_type = "dcim.module" if self.use_modules() is True else "dcim.inventoryitem"
 
         self.add_update_custom_field({
             "name": "host_cpu_cores",
@@ -1095,7 +1324,7 @@ class CheckRedfish(SourceBase):
             "name": "firmware",
             "label": "Firmware",
             "object_types": [
-                "dcim.inventoryitem",
+                component_object_type,
                 "dcim.powerport"
             ],
             "type": "text",
@@ -1106,7 +1335,7 @@ class CheckRedfish(SourceBase):
         self.add_update_custom_field({
             "name": "inventory_type",
             "label": "Type",
-            "object_types": ["dcim.inventoryitem"],
+            "object_types": [component_object_type],
             "type": "text",
             "description": "Describes the type of inventory item"
         })
@@ -1115,7 +1344,7 @@ class CheckRedfish(SourceBase):
         self.add_update_custom_field({
             "name": "inventory_size",
             "label": "Size",
-            "object_types": ["dcim.inventoryitem"],
+            "object_types": [component_object_type],
             "type": "text",
             "description": "Describes the size of the inventory item if applicable"
         })
@@ -1124,7 +1353,7 @@ class CheckRedfish(SourceBase):
         self.add_update_custom_field({
             "name": "inventory_speed",
             "label": "Speed",
-            "object_types": ["dcim.inventoryitem"],
+            "object_types": [component_object_type],
             "type": "text",
             "description": "Describes the speed of the inventory item if applicable"
         })
@@ -1134,7 +1363,7 @@ class CheckRedfish(SourceBase):
             "name": "health",
             "label": "Health",
             "object_types": [
-                "dcim.inventoryitem",
+                component_object_type,
                 "dcim.powerport",
                 "dcim.device"
             ],

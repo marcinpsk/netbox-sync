@@ -1,0 +1,114 @@
+{
+  "meta": {
+    "inventory_layout_version": "2.0.0",
+    "inventory_id": "REPLACE_WITH_NETBOX_DEVICE_ID",
+    "source": "netbox-sync module verification fixture",
+    "host_that_collected_inventory": "verification",
+    "script_version": "2.0.0"
+  },
+  "inventory": {
+    "system": [
+      {
+        "id": "1",
+        "name": "System",
+        "serial": "MODTEST-SN-0001",
+        "host_name": "modtest01.example.com",
+        "manufacturer": "Dell Inc.",
+        "model": "PowerEdge R650",
+        "health_status": "OK",
+        "power_state": "On",
+        "operation_status": "GoodInUse"
+      }
+    ],
+    "processor": [
+      {
+        "id": "1",
+        "socket": "CPU 1",
+        "model": "Intel(R) Xeon(R) Gold 6348 CPU @ 2.60GHz",
+        "manufacturer": "Intel",
+        "serial": "CPU-SN-0001",
+        "instruction_set": "x86-64",
+        "current_speed": 2600,
+        "cores": "28",
+        "threads": "56",
+        "health_status": "OK",
+        "operation_status": "GoodInUse"
+      },
+      {
+        "id": "2",
+        "socket": "CPU 2",
+        "model": "Intel(R) Xeon(R) Gold 6348 CPU @ 2.60GHz",
+        "manufacturer": "Intel",
+        "serial": "CPU-SN-0002",
+        "instruction_set": "x86-64",
+        "current_speed": 2600,
+        "cores": "28",
+        "threads": "56",
+        "health_status": "OK",
+        "operation_status": "GoodInUse"
+      }
+    ],
+    "memory": [
+      {
+        "id": "1",
+        "name": "DIMM A1",
+        "type": "DDR4",
+        "serial": "DIMM-SN-0001",
+        "manufacturer": "Samsung",
+        "part_number": "M393A4K40DB3-CWE",
+        "size_in_mb": 32768,
+        "channel": "A",
+        "slot": "1",
+        "socket": "1",
+        "speed": 3200,
+        "health_status": "OK",
+        "operation_status": "GoodInUse"
+      },
+      {
+        "id": "2",
+        "name": "DIMM B1",
+        "type": "DDR4",
+        "serial": "DIMM-SN-0002",
+        "manufacturer": "Samsung",
+        "part_number": "M393A4K40DB3-CWE",
+        "size_in_mb": 32768,
+        "channel": "B",
+        "slot": "1",
+        "socket": "2",
+        "speed": 3200,
+        "health_status": "OK",
+        "operation_status": "GoodInUse"
+      }
+    ],
+    "physical_drive": [
+      {
+        "id": "1",
+        "name": "Disk 0",
+        "manufacturer": "Dell",
+        "model": "MZ7LH480HBHQ",
+        "serial": "DRV-SN-0001",
+        "firmware": "RVT0",
+        "interface_type": "SATA",
+        "size_in_byte": 480103981056,
+        "health_status": "OK",
+        "operation_status": "GoodInUse"
+      }
+    ],
+    "power_supply": [
+      {
+        "id": "1",
+        "name": "PS1 Status",
+        "bay": "1",
+        "type": "AC",
+        "vendor": "Dell",
+        "model": "PWR-SUPPLY-800W",
+        "part_number": "0CCKKR",
+        "serial": "PSU-SN-0001",
+        "firmware": "00.1B.53",
+        "capacity_in_watt": 800,
+        "health_status": "OK",
+        "operation_status": "GoodInUse"
+      }
+    ]
+  }
+}
