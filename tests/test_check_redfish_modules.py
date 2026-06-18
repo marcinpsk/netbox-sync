@@ -466,8 +466,54 @@ def test_power_port_attached_to_its_power_supply_module():
     power_ports = inventory.get_all_items(NBPowerPort)
     assert len(power_ports) == 1
     assert grab(power_ports[0], "data.module") is psu_module
-    # the port lives in the same bay the module is installed in
-    assert grab(power_ports[0], "data.name") == grab(psu_module, "data.module_bay.data.name")
+    # the PSU sits in a stable, slot-based bay (the volatile "(AC)" type is not part of it)
+    assert grab(psu_module, "data.module_bay.data.name") == "PS1"
+
+
+def test_power_supply_bay_keyed_on_stable_slot_not_type():
+    """The PSU module bay must be the stable physical slot (e.g. "PS1"), independent of the
+    AC/DC type which is part of the supply, not the slot - so a later swap reuses the bay."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.settings.overwrite_power_supply_name = False
+    source.settings.overwrite_power_supply_attributes = False
+    source.inventory_file_content = _psu_inventory()  # name "PS1", type "AC"
+
+    source.update_power_supply()
+
+    bays = inventory.get_all_items(NBModuleBay)
+    assert len(bays) == 1
+    # the bay identity is the slot only; the volatile "(AC)" type must not be in the bay name
+    assert bays[0].data["name"] == "PS1"
+
+
+def test_power_supply_swap_reuses_bay_and_repoints_module_type():
+    """Swapping the supply in a slot (AC -> DC, different model) reuses the same module bay and
+    re-points the module type, instead of churning a new bay - exactly like a CPU socket swap."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.settings.overwrite_power_supply_name = False
+    source.settings.overwrite_power_supply_attributes = False
+
+    def psu(ps_type, model, part):
+        return {"inventory": {"power_supply": [
+            {"name": "PS1", "type": ps_type, "vendor": "Dell", "model": model,
+             "serial": "PSU-AAA", "part_number": part, "capacity_in_watt": 750,
+             "firmware": "1.2", "health_status": "OK", "operation_status": "Enabled"}]}}
+
+    source.inventory_file_content = psu("AC", "PWR-AC-750", "PN-AC")
+    source.update_power_supply()
+    source.inventory_file_content = psu("DC", "PWR-DC-1100", "PN-DC")
+    source.update_power_supply()
+
+    # the slot is reused - no bay/module churn ...
+    bays = inventory.get_all_items(NBModuleBay)
+    assert len(bays) == 1
+    assert bays[0].data["name"] == "PS1"
+    modules = inventory.get_all_items(NBModule)
+    assert len(modules) == 1
+    # ... and the module type now reflects the newly installed (DC) part
+    assert grab(modules[0], "data.module_type.data.model") == "PWR-DC-1100"
+    # the power port stays linked to that single module
+    assert grab(inventory.get_all_items(NBPowerPort)[0], "data.module") is modules[0]
 
 
 def test_power_port_not_attached_to_module_when_feature_disabled():

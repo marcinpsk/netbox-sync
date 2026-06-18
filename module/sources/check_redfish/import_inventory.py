@@ -325,7 +325,12 @@ class CheckRedfish(SourceBase):
                 "inventory_type": "Power Supply",
                 "health": health_status,
                 "description": description,
+                # the supply's slot is the stable module bay identity, independent of the volatile
+                # AC/DC type embedded in the display name (a swap must reuse the bay, not churn it)
+                "bay_name": ps_name,
                 "full_name": name,
+                # the supply model is the module type (catalog) identifier when modeling as modules
+                "model": model,
                 "serial": get_string_or_none(grab(ps, "serial")),
                 "manufacturer": get_string_or_none(grab(ps, "vendor")),
                 "part_number": get_string_or_none(grab(ps, "part_number")),
@@ -367,8 +372,8 @@ class CheckRedfish(SourceBase):
                 ps_object.update(data=data_to_update, source=self)
                 current_ps.remove(ps_object)
 
-            # the PSU module lives in a bay named after the supply's full name (module_bay_name)
-            power_port_links.append((ps_object, name))
+            # the PSU module lives in the bay keyed on the stable slot (matches module_bay_name)
+            power_port_links.append((ps_object, ps_name))
 
             ps_index += 1
 
