@@ -1305,7 +1305,6 @@ class NBCustomField(NetBoxObject):
             NBClusterGroup.object_type,
             NBVMInterface.object_type,
             NBVM.object_type,
-            # NBModule is defined later in this module, the reference is resolved at instantiation time
             NBModule.object_type
         ]
 
@@ -2065,7 +2064,11 @@ class NBInterface(NetBoxObject):
             "description": 200,
             "mark_connected": bool,
             "tags": NBTagList,
-            "parent": object
+            "parent": object,
+            # the module this interface belongs to (NBModule is defined later in this module,
+            # the reference is resolved at instantiation time). NetBox cascade-deletes module
+            # components, so deleting the module removes its interfaces.
+            "module": NBModule
         }
         super().__init__(*args, **kwargs)
 

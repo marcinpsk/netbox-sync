@@ -89,6 +89,10 @@ class CheckRedfish(SourceBase):
 
         self.interface_adapter_type_dict = dict()
 
+        # maps a network adapter id to the name of the module bay its NIC module lives in,
+        # used to attach discovered NIC port interfaces to their parent module
+        self.nic_module_bay_by_adapter_id = dict()
+
     def apply(self):
         """
         Main source handler method. This method is called for each source from "main" program
@@ -170,6 +174,7 @@ class CheckRedfish(SourceBase):
 
         # reset interface types
         self.interface_adapter_type_dict = dict()
+        self.nic_module_bay_by_adapter_id = dict()
 
     def read_inventory_file_content(self, filename: str) -> bool:
         """
@@ -715,6 +720,9 @@ class CheckRedfish(SourceBase):
 
             if adapter_id is not None:
                 self.interface_adapter_type_dict[adapter_id] = nic_type
+                # remember which module bay this adapter's NIC module lives in so its ports
+                # can be attached to the module later
+                self.nic_module_bay_by_adapter_id[adapter_id] = adapter_name or "None"
 
             items.append({
                 "inventory_type": "NIC",
@@ -733,6 +741,38 @@ class CheckRedfish(SourceBase):
             })
 
         self.update_all_items(items)
+
+    def find_device_module_by_bay_name(self, bay_name: str) -> NBModule:
+        """Return the module installed in the named bay on the current device, or None."""
+
+        if bay_name is None:
+            return None
+
+        for module in self.inventory.get_all_items(NBModule):
+            if grab(module, "data.device") == self.device_object and \
+                    grab(module, "data.module_bay.data.name") == bay_name:
+                return module
+
+        return None
+
+    def interface_parent_module(self, adapter_id, mgmt_only: bool) -> NBModule:
+        """
+        Determine the module a discovered interface belongs to: a management interface belongs to
+        the BMC/manager module, a regular NIC port to its network adapter's module. Returns None
+        when components are not modeled as modules or no matching module exists.
+        """
+
+        if self.use_modules() is not True:
+            return None
+
+        if mgmt_only is True and self.manager_name is not None:
+            bay_name = self.manager_name
+        elif adapter_id is not None:
+            bay_name = self.nic_module_bay_by_adapter_id.get(adapter_id)
+        else:
+            bay_name = None
+
+        return self.find_device_module_by_bay_name(bay_name)
 
     def update_network_interface(self):
 
@@ -818,6 +858,11 @@ class CheckRedfish(SourceBase):
                 "mgmt_only": mgmt_only,
                 "health": health_status
             }
+
+            # attach this interface to its parent module (NIC adapter / BMC) when modeling modules
+            parent_module = self.interface_parent_module(adapter_id, mgmt_only)
+            if parent_module is not None:
+                port_data_dict[port_name]["module"] = parent_module
 
             if len(description) > 0:
                 port_data_dict[port_name]["description"] = ", ".join(description)
