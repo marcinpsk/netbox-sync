@@ -2403,7 +2403,11 @@ class NBPowerPort(NetBoxObject):
             "allocated_draw": int,
             "mark_connected": bool,
             "tags": NBTagList,
-            "custom_fields": NBCustomField
+            "custom_fields": NBCustomField,
+            # the module (power supply) this port belongs to (NBModule is defined later in this
+            # module, the reference is resolved at instantiation time). NetBox cascade-deletes
+            # module components, so deleting the PSU module removes its power port.
+            "module": NBModule
         }
         super().__init__(*args, **kwargs)
 

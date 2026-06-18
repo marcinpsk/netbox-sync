@@ -23,6 +23,7 @@ from module.netbox.object_classes import (
     NBModuleType,
     NBInventoryItem,
     NBManufacturer,
+    NBPowerPort,
 )
 from module.sources.check_redfish.import_inventory import CheckRedfish
 
@@ -430,6 +431,61 @@ def test_interfaces_not_attached_to_modules_when_feature_disabled():
     # with the feature off, the legacy "<label> (<id>)" interface name is preserved unchanged
     assert grab(interfaces[0], "data.name") == "Slot 1 Port 1 (NIC.Slot.1-1)"
     assert len(inventory.get_all_items(NBModule)) == 0
+
+
+def _psu_inventory():
+    return {
+        "inventory": {
+            "power_supply": [
+                {"name": "PS1", "type": "AC", "vendor": "Dell", "model": "PWR-750W",
+                 "serial": "PSU-AAA", "part_number": "0ABC", "capacity_in_watt": 750,
+                 "firmware": "1.2", "health_status": "OK", "operation_status": "Enabled"}
+            ]
+        }
+    }
+
+
+def test_power_port_attached_to_its_power_supply_module():
+    """A power supply is modeled as a module; its power port hangs off that module (module FK)
+    so NetBox cascade-deletes the port when the PSU module is removed."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.settings.overwrite_power_supply_name = False
+    source.settings.overwrite_power_supply_attributes = False
+    source.inventory_file_content = _psu_inventory()
+
+    source.update_power_supply()
+
+    # the PSU is modeled as a module in its own bay (not a deprecated inventory item)
+    modules = inventory.get_all_items(NBModule)
+    assert len(modules) == 1
+    psu_module = modules[0]
+    assert grab(psu_module, "data.custom_fields.inventory_type") == "Power Supply"
+    assert len(inventory.get_all_items(NBInventoryItem)) == 0
+
+    # the power port exists and is linked to that exact PSU module object
+    power_ports = inventory.get_all_items(NBPowerPort)
+    assert len(power_ports) == 1
+    assert grab(power_ports[0], "data.module") is psu_module
+    # the port lives in the same bay the module is installed in
+    assert grab(power_ports[0], "data.name") == grab(psu_module, "data.module_bay.data.name")
+
+
+def test_power_port_not_attached_to_module_when_feature_disabled():
+    """With the modules feature off, the PSU stays a deprecated inventory item and its power port
+    must not get a module reference."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.overwrite_power_supply_name = False
+    source.settings.overwrite_power_supply_attributes = False
+    source.inventory_file_content = _psu_inventory()
+
+    source.update_power_supply()
+
+    power_ports = inventory.get_all_items(NBPowerPort)
+    assert len(power_ports) == 1
+    assert grab(power_ports[0], "data.module") is None
+    assert len(inventory.get_all_items(NBModule)) == 0
+    # the deprecated inventory-item path is used for the PSU instead
+    assert len(inventory.get_all_items(NBInventoryItem)) == 1
 
 
 def test_inventory_item_backend_when_feature_disabled():

@@ -280,6 +280,9 @@ class CheckRedfish(SourceBase):
 
         ps_index = 1
         ps_items = list()
+        # remember each power port together with the module bay name of its power supply so we can
+        # link them after the PSU modules are created (via update_all_items) further down
+        power_port_links = list()
         for ps in grab(self.inventory_file_content, "inventory.power_supply", fallback=list()):
 
             if grab(ps, "operation_status") in ["NotPresent", "Absent"]:
@@ -355,7 +358,7 @@ class CheckRedfish(SourceBase):
                     break
 
             if ps_object is None:
-                self.inventory.add_object(NBPowerPort, data=ps_data, source=self)
+                ps_object = self.inventory.add_object(NBPowerPort, data=ps_data, source=self)
             else:
                 if self.settings.overwrite_power_supply_name is False:
                     del(ps_data["name"])
@@ -364,9 +367,20 @@ class CheckRedfish(SourceBase):
                 ps_object.update(data=data_to_update, source=self)
                 current_ps.remove(ps_object)
 
+            # the PSU module lives in a bay named after the supply's full name (module_bay_name)
+            power_port_links.append((ps_object, name))
+
             ps_index += 1
 
         self.update_all_items(ps_items)
+
+        # link each power port to its power-supply module so NetBox cascade-deletes the port when
+        # the module is removed (module FK), mirroring how NIC ports hang off their adapter module
+        if self.use_modules() is True:
+            for power_port, bay_name in power_port_links:
+                psu_module = self.find_device_module_by_bay_name(bay_name)
+                if psu_module is not None:
+                    power_port.update(data={"module": psu_module}, source=self)
 
     def update_fan(self):
 
