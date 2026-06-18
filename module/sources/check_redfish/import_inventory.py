@@ -818,7 +818,19 @@ class CheckRedfish(SourceBase):
             if wwn is not None:
                 discovered_int_list.append(wwn)
 
-            if port_name is not None:
+            # if number of managers belonging to this port is not 0 then it's a BMC port
+            mgmt_only = len(manager_ids) > 0
+
+            # human-friendly label from redfish (e.g. "Integrated NIC 1 Port 1 Partition 1")
+            friendly_name = port_name
+            name_from_stable_id = False
+
+            if self.use_modules() and mgmt_only is False and port_id is not None:
+                # name the NIC port by its stable redfish id (e.g. NIC.Integrated.1-1); the long
+                # descriptive label moves to the description instead of being part of the name
+                port_name = port_id
+                name_from_stable_id = True
+            elif port_name is not None:
                 port_name += f" ({port_id})"
             else:
                 port_name = port_id
@@ -829,13 +841,10 @@ class CheckRedfish(SourceBase):
                 link_type = NetBoxInterfaceType(link_speed)
 
             description = list()
+            if name_from_stable_id is True and friendly_name is not None and friendly_name != port_name:
+                description.append(friendly_name)
             if hostname is not None:
                 description.append(f"Hostname: {hostname}")
-
-            mgmt_only = False
-            # if number of managers belonging to this port is not 0 then it's a BMC port
-            if len(manager_ids) > 0:
-                mgmt_only = True
 
             # get enabled state
             enabled = False

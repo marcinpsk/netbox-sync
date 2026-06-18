@@ -346,7 +346,7 @@ def test_nic_and_bmc_interfaces_are_attached_to_their_modules():
     source.update_network_interface()
 
     interfaces = {grab(i, "data.name"): i for i in inventory.get_all_items(NBInterface)}
-    nic_interface = interfaces["Slot 1 Port 1 (NIC.Slot.1-1)"]
+    nic_interface = interfaces["NIC.Slot.1-1"]
     bmc_interface = interfaces["iDRAC 9 (NIC.1)"]
 
     # the NIC port belongs to its adapter's module, the BMC port to the manager module
@@ -355,6 +355,45 @@ def test_nic_and_bmc_interfaces_are_attached_to_their_modules():
 
     # and it really is the same module object created for this device
     assert grab(nic_interface, "data.module") is source.find_device_module_by_bay_name("NIC.Slot.1")
+
+
+def test_nic_port_interface_named_by_stable_redfish_id():
+    """With modules on, a NIC port is named by its stable redfish id (e.g. NIC.Slot.1-1) rather
+    than the long human label prepended to it; the descriptive label moves to the description."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.interface_adapter_type_dict = {}
+    source.nic_module_bay_by_adapter_id = {}
+    source.manager_name = None
+    source.settings.overwrite_interface_name = False
+    source.settings.overwrite_interface_attributes = False
+    source.settings.permitted_subnets = None
+    source.settings.ip_tenant_inheritance_order = []
+
+    source.inventory_file_content = {
+        "inventory": {
+            "network_adapter": [
+                {"id": "NIC.Integrated.1", "name": "NIC.Integrated.1", "model": "BCM57412",
+                 "manufacturer": "Broadcom", "operation_status": "Enabled", "num_ports": "1"}
+            ],
+            "network_port": [
+                {"id": "NIC.Integrated.1-1", "name": "Integrated NIC 1 Port 1 Partition 1",
+                 "adapter_id": "NIC.Integrated.1", "operation_status": "Enabled",
+                 "link_status": "Up", "addresses": [], "capable_speed": 10000,
+                 "manager_ids": []},
+            ],
+        }
+    }
+
+    source.update_network_adapter()
+    source.update_network_interface()
+
+    interfaces = {grab(i, "data.name"): i for i in inventory.get_all_items(NBInterface)}
+
+    # the stable id is the name; the description carries the human label, not the name
+    assert "NIC.Integrated.1-1" in interfaces
+    assert "Integrated NIC 1 Port 1 Partition 1 (NIC.Integrated.1-1)" not in interfaces
+    assert grab(interfaces["NIC.Integrated.1-1"], "data.description") == \
+        "Integrated NIC 1 Port 1 Partition 1"
 
 
 def test_interfaces_not_attached_to_modules_when_feature_disabled():
@@ -388,6 +427,8 @@ def test_interfaces_not_attached_to_modules_when_feature_disabled():
     interfaces = inventory.get_all_items(NBInterface)
     assert len(interfaces) == 1
     assert grab(interfaces[0], "data.module") is None
+    # with the feature off, the legacy "<label> (<id>)" interface name is preserved unchanged
+    assert grab(interfaces[0], "data.name") == "Slot 1 Port 1 (NIC.Slot.1-1)"
     assert len(inventory.get_all_items(NBModule)) == 0
 
 
