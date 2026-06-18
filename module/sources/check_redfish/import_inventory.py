@@ -1192,6 +1192,19 @@ class CheckRedfish(SourceBase):
 
         return item_data.get("bay_name") or item_data.get("full_name")
 
+    def device_manufacturer_name(self) -> str:
+        """
+        NetBox requires a manufacturer on every module type. Components like fans, PCIe extenders
+        or storage enclosures don't report one, so fall back to the device's own manufacturer
+        (the server vendor), or a generic placeholder when even that is unavailable.
+        """
+
+        device_manufacturer = grab(self.device_object, "data.device_type.data.manufacturer")
+        if isinstance(device_manufacturer, NetBoxObject):
+            return device_manufacturer.get_display_name()
+
+        return "Unknown"
+
     def resolve_module_type(self, item_data: dict) -> NBModuleType:
         """
         Find or create the module type (catalog entry) describing the installed part, e.g. the
@@ -1202,12 +1215,22 @@ class CheckRedfish(SourceBase):
         part_number = item_data.get("part_number")
 
         # the module type model is the catalog identifier of the part (e.g. the exact CPU model)
-        module_type_data = {"model": item_data.get("model") or part_number or item_data.get("full_name")}
-        manufacturer = item_data.get("manufacturer")
-        if manufacturer is not None:
-            module_type_data["manufacturer"] = {"name": manufacturer}
+        model = item_data.get("model") or part_number or item_data.get("full_name")
+        module_type_data = {"model": model}
         if part_number is not None:
             module_type_data["part_number"] = part_number
+
+        # manufacturer is mandatory in NetBox. Prefer what redfish reports; otherwise reuse the
+        # manufacturer of an existing module type for this model (so a curated/previous value is
+        # not clobbered) and only fall back to the device vendor when creating a brand new type.
+        manufacturer = item_data.get("manufacturer")
+        if manufacturer is None:
+            existing_module_type = self.inventory.get_by_data(NBModuleType, data={"model": model})
+            if existing_module_type is None or grab(existing_module_type, "data.manufacturer") is None:
+                manufacturer = self.device_manufacturer_name()
+
+        if manufacturer is not None:
+            module_type_data["manufacturer"] = {"name": manufacturer}
 
         return self.inventory.add_update_object(NBModuleType, data=module_type_data, source=self)
 

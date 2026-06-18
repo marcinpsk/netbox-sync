@@ -16,6 +16,7 @@ from module.common.misc import grab
 from module.netbox.inventory import NetBoxInventory
 from module.netbox.object_classes import (
     NBDevice,
+    NBDeviceType,
     NBModule,
     NBModuleBay,
     NBModuleType,
@@ -229,6 +230,80 @@ def test_missing_component_marks_module_health_absent():
     }
     assert grab(modules_by_bay["Socket 1"], "data.custom_fields.health") == "OK"
     assert grab(modules_by_bay["Socket 2"], "data.custom_fields.health") == "Absent"
+
+
+def fan_item(bay_name="System Board Fan1 (ID: 0.56)", health="OK"):
+    """A component that reports no manufacturer (fans, enclosures, PCIe extenders, ...)."""
+    return {
+        "inventory_type": "Fan",
+        "description": ["Context: SystemBoard"],
+        "full_name": bay_name,
+        "health": health,
+        "speed": "9240RPM",
+    }
+
+
+def test_component_without_manufacturer_uses_device_manufacturer():
+    """NetBox requires a manufacturer on a module type. Components that report none (fans,
+    storage enclosures, PCIe extenders) must still get one, otherwise the module-type POST
+    fails with 'manufacturer required' and the whole module create cascade fails."""
+    source, inventory, device = make_source(True, "4.3.0")
+
+    # give the device a manufacturer via its device type, like a real synced device has
+    manufacturer = inventory.add_object(NBManufacturer, data={"name": "Acme"}, source=source)
+    device_type = inventory.add_object(
+        NBDeviceType, data={"model": "PowerEdge R650", "manufacturer": manufacturer}, source=source)
+    device.update(data={"device_type": device_type}, source=source)
+
+    source.update_all_items([fan_item()])
+
+    module_types = inventory.get_all_items(NBModuleType)
+    assert len(module_types) == 1
+    assert len(inventory.get_all_items(NBModule)) == 1
+
+    # the (required) manufacturer is populated from the device's vendor
+    device_manufacturer = grab(device, "data.device_type.data.manufacturer.data.name")
+    assert grab(module_types[0], "data.manufacturer.data.name") == device_manufacturer
+
+
+def test_component_without_manufacturer_falls_back_to_unknown():
+    """When neither the component nor the device exposes a manufacturer, fall back to a
+    placeholder so the required module type field is always populated."""
+    source, inventory, _ = make_source(True, "4.3.0")  # device has no device type / manufacturer
+
+    source.update_all_items([fan_item()])
+
+    module_types = inventory.get_all_items(NBModuleType)
+    assert len(module_types) == 1
+    assert grab(module_types[0], "data.manufacturer.data.name") == "Unknown"
+    assert len(inventory.get_all_items(NBModule)) == 1
+
+
+def test_existing_module_type_manufacturer_is_preserved():
+    """If a module type for this model already exists in NetBox with a manufacturer (set by a
+    previous sync or curated by hand), a later sync of a component that reports no manufacturer
+    must reuse it, not overwrite it with the device-vendor / 'Unknown' fallback."""
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    # a module type for this model already exists in NetBox, manufacturer "Globex"
+    globex = inventory.add_object(NBManufacturer, data={"name": "Globex"}, source=source)
+    inventory.add_object(
+        NBModuleType, data={"model": "PCIe Extender", "manufacturer": globex}, source=source)
+
+    # the PCIe extender reports no manufacturer
+    source.update_all_items([{
+        "inventory_type": "Storage Controller",
+        "full_name": "PCIe Extender",
+        "model": "PCIe Extender",
+        "health": "OK",
+        "description": ["LDs: 1, PDs: 1"],
+    }])
+
+    module_types = [mt for mt in inventory.get_all_items(NBModuleType)
+                    if grab(mt, "data.model") == "PCIe Extender"]
+    assert len(module_types) == 1
+    # the pre-existing manufacturer is preserved, not clobbered by the fallback
+    assert grab(module_types[0], "data.manufacturer.data.name") == "Globex"
 
 
 def test_inventory_item_backend_when_feature_disabled():
