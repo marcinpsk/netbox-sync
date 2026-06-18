@@ -516,6 +516,67 @@ def test_power_supply_swap_reuses_bay_and_repoints_module_type():
     assert grab(inventory.get_all_items(NBPowerPort)[0], "data.module") is modules[0]
 
 
+def test_power_port_module_link_detached_when_feature_disabled_after_enable():
+    """An enable -> disable transition must clear the previously persisted power-port module link.
+    unset_attribute marks the field for a real None PATCH (update() alone silently skips None), so
+    ownership is not left stale and a later module prune can't cascade-delete a port we manage."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.settings.overwrite_power_supply_name = False
+    source.settings.overwrite_power_supply_attributes = False
+
+    # run 1: modules on -> the power port gets linked to its PSU module
+    source.inventory_file_content = _psu_inventory()
+    source.update_power_supply()
+    power_port = inventory.get_all_items(NBPowerPort)[0]
+    assert grab(power_port, "data.module") is not None
+
+    # run 2: modules off -> the now-stale link must be detached
+    source.settings.model_components_as_modules = False
+    source.update_power_supply()
+    assert "module" in power_port.unset_items
+
+
+def test_interface_module_link_detached_when_feature_disabled_after_enable():
+    """Same enable -> disable detach guarantee for interfaces. Uses the BMC/management interface
+    because its name is stable across the modules and inventory-item paths, so it is matched by
+    name on the second run (a regular NIC port is renamed and would not match)."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.interface_adapter_type_dict = {}
+    source.nic_module_bay_by_adapter_id = {}
+    source.manager_name = None
+    source.settings.overwrite_interface_name = False
+    source.settings.overwrite_interface_attributes = False
+    source.settings.permitted_subnets = None
+    source.settings.ip_tenant_inheritance_order = []
+
+    inv = {
+        "inventory": {
+            "manager": [
+                {"name": "iDRAC 9", "model": None, "licenses": [], "firmware": "7.0",
+                 "health_status": "OK"}
+            ],
+            "network_port": [
+                {"id": "NIC.1", "name": "iDRAC", "adapter_id": None,
+                 "operation_status": "Enabled", "link_status": "Up", "addresses": [],
+                 "capable_speed": 1000, "manager_ids": ["iDRAC.Embedded.1"]},
+            ],
+        }
+    }
+
+    # run 1: modules on -> the BMC interface is linked to the manager module
+    source.inventory_file_content = inv
+    source.update_manager()
+    source.update_network_interface()
+    interface = inventory.get_all_items(NBInterface)[0]
+    assert grab(interface, "data.module") is not None
+
+    # run 2: modules off -> the now-stale interface->module link must be detached
+    source.settings.model_components_as_modules = False
+    source.update_manager()
+    source.update_network_interface()
+    assert "module" in interface.unset_items
+
+
 def test_power_port_not_attached_to_module_when_feature_disabled():
     """With the modules feature off, the PSU stays a deprecated inventory item and its power port
     must not get a module reference."""

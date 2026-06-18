@@ -379,13 +379,16 @@ class CheckRedfish(SourceBase):
 
         self.update_all_items(ps_items)
 
-        # link each power port to its power-supply module so NetBox cascade-deletes the port when
-        # the module is removed (module FK), mirroring how NIC ports hang off their adapter module
-        if self.use_modules() is True:
-            for power_port, bay_name in power_port_links:
-                psu_module = self.find_device_module_by_bay_name(bay_name)
-                if psu_module is not None:
-                    power_port.update(data={"module": psu_module}, source=self)
+        # link each power port to its power-supply module (so NetBox cascade-deletes the port when
+        # the module is removed, mirroring how NIC ports hang off their adapter module) or detach a
+        # now-stale link when modules are off / no module resolves, so an enable -> disable
+        # transition clears the persisted reference instead of leaving incorrect ownership
+        for power_port, bay_name in power_port_links:
+            psu_module = self.find_device_module_by_bay_name(bay_name) if self.use_modules() is True else None
+            if psu_module is not None:
+                power_port.update(data={"module": psu_module}, source=self)
+            else:
+                power_port.unset_attribute("module")
 
     def update_fan(self):
 
@@ -924,6 +927,12 @@ class CheckRedfish(SourceBase):
 
             # get current object for this interface if it exists
             nic_object = data.get(port_name)
+
+            # detach a now-stale module link on an existing interface when no parent module
+            # resolves (modules off, or the parent module disappeared) so an enable -> disable
+            # transition clears the reference and a module prune can't cascade-delete a port we manage
+            if nic_object is not None and "module" not in port_data:
+                nic_object.unset_attribute("module")
 
             # unset "illegal" attributes
             for attribute in ["inventory_type", "health"]:
