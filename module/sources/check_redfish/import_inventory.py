@@ -502,6 +502,8 @@ class CheckRedfish(SourceBase):
                 "inventory_type": "CPU",
                 "description": description,
                 "manufacturer": get_string_or_none(grab(processor, "manufacturer")),
+                # the socket is the stable module bay identity (independent of the installed model)
+                "bay_name": socket,
                 "full_name": name,
                 # the CPU model is the module type (catalog) identifier when modeling as modules
                 "model": model,
@@ -717,7 +719,11 @@ class CheckRedfish(SourceBase):
             items.append({
                 "inventory_type": "NIC",
                 "manufacturer": manufacturer,
+                # the adapter slot is the stable module bay identity (independent of the model)
+                "bay_name": adapter_name or "None",
                 "full_name": name,
+                # the adapter model is the module type (catalog) identifier when modeling as modules
+                "model": model,
                 "serial": serial,
                 "part_number": get_string_or_none(grab(adapter, "part_number")),
                 "firmware": firmware,
@@ -1139,17 +1145,17 @@ class CheckRedfish(SourceBase):
         matched_modules = dict()
         unmatched_module_items = list()
 
-        # try to match names to existing modules
+        # try to match items to existing modules by their stable module bay identity
         for item in items:
 
-            current_module = current_modules.get(item.get("full_name"))
+            current_module = current_modules.get(self.module_bay_name(item))
             if current_module is not None:
                 matched_modules[current_module] = item
             else:
                 unmatched_module_items.append(item)
 
-        # sort unmatched items by full_name
-        unmatched_module_items.sort(key=lambda x: x.get("full_name") or "")
+        # sort unmatched items by module bay name
+        unmatched_module_items.sort(key=lambda x: self.module_bay_name(x) or "")
 
         # iterate over current NetBox modules
         # if name did not match try to assign unmatched items in alphabetical order
@@ -1172,6 +1178,38 @@ class CheckRedfish(SourceBase):
         # create new module in NetBox
         for unmatched_module_item in unmatched_module_items:
             self.update_module(unmatched_module_item)
+
+    def module_bay_name(self, item_data: dict) -> str:
+        """
+        Return the stable module bay identity (the physical slot) for a component.
+
+        The bay represents the slot, so it must be keyed on a stable identifier (CPU socket,
+        NIC slot, ...) that does not change when the installed part's model changes - otherwise
+        a model swap would rename the bay and churn it. Parsers provide it via 'bay_name'; we
+        fall back to the display name for components whose name is already slot based and does
+        not embed a model.
+        """
+
+        return item_data.get("bay_name") or item_data.get("full_name")
+
+    def resolve_module_type(self, item_data: dict) -> NBModuleType:
+        """
+        Find or create the module type (catalog entry) describing the installed part, e.g. the
+        exact CPU/DIMM/NIC model. Shared by create and update so a replaced part re-points to the
+        correct module type instead of keeping a stale reference.
+        """
+
+        part_number = item_data.get("part_number")
+
+        # the module type model is the catalog identifier of the part (e.g. the exact CPU model)
+        module_type_data = {"model": item_data.get("model") or part_number or item_data.get("full_name")}
+        manufacturer = item_data.get("manufacturer")
+        if manufacturer is not None:
+            module_type_data["manufacturer"] = {"name": manufacturer}
+        if part_number is not None:
+            module_type_data["part_number"] = part_number
+
+        return self.inventory.add_update_object(NBModuleType, data=module_type_data, source=self)
 
     def update_module(self, item_data: dict, module_object: NBModule = None):
         """
@@ -1208,8 +1246,12 @@ class CheckRedfish(SourceBase):
             self.create_module(item_data, description, module_custom_fields)
             return
 
-        # update an existing module
-        module_data = {"custom_fields": module_custom_fields}
+        # update an existing module; re-point the module type in case the installed part was
+        # replaced with a different model in the same bay
+        module_data = {
+            "custom_fields": module_custom_fields,
+            "module_type": self.resolve_module_type(item_data)
+        }
         if item_data.get("serial") is not None:
             module_data["serial"] = item_data.get("serial")
         if description is not None and len(description) > 0:
@@ -1232,25 +1274,16 @@ class CheckRedfish(SourceBase):
             the custom fields to store on the module
         """
 
-        full_name = item_data.get("full_name")
-        manufacturer = item_data.get("manufacturer")
-        part_number = item_data.get("part_number")
         serial = item_data.get("serial")
         has_description = description is not None and len(description) > 0
 
-        # the module type model is the catalog identifier of the part (e.g. the exact CPU model)
-        module_type_data = {"model": item_data.get("model") or part_number or full_name}
-        if manufacturer is not None:
-            module_type_data["manufacturer"] = {"name": manufacturer}
-        if part_number is not None:
-            module_type_data["part_number"] = part_number
+        module_type = self.resolve_module_type(item_data)
 
-        module_type = self.inventory.add_update_object(NBModuleType, data=module_type_data, source=self)
-
-        # the module bay represents the physical slot the component lives in
+        # the module bay represents the physical slot the component lives in; it is keyed on a
+        # stable slot identifier so a later model swap reuses the same bay instead of churning it
         module_bay_data = {
             "device": self.device_object,
-            "name": full_name
+            "name": self.module_bay_name(item_data)
         }
         if item_data.get("label") is not None:
             module_bay_data["label"] = item_data.get("label")

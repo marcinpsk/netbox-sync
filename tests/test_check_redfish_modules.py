@@ -53,17 +53,23 @@ def make_source(model_components_as_modules: bool, netbox_api_version: str):
     return source, inventory, device
 
 
-def cpu_item(full_name="Socket 1 (Intel Xeon Gold 6248R)",
+def cpu_item(bay_name="Socket 1",
              model="Intel Xeon Gold 6248R",
              serial="CPU-AAA",
              manufacturer="Intel",
-             health="OK"):
-    """Build a normalized CPU component item as produced by CheckRedfish.update_proc()."""
+             health="OK",
+             full_name=None):
+    """Build a normalized CPU component item as produced by CheckRedfish.update_proc().
+
+    bay_name is the stable physical slot (the module bay identity); full_name is the
+    display name and by default embeds the model, exactly like the real parser does.
+    """
     return {
         "inventory_type": "CPU",
         "description": ["x86-64", "Cores: 24", "Threads: 48"],
         "manufacturer": manufacturer,
-        "full_name": full_name,
+        "bay_name": bay_name,
+        "full_name": full_name if full_name is not None else f"{bay_name} ({model})",
         "model": model,
         "serial": serial,
         "health": health,
@@ -118,8 +124,8 @@ def test_creates_full_module_graph_for_cpu():
     assert grab(module, "data.custom_fields.inventory_speed") == "3.0GHz"
     assert grab(module, "data.custom_fields.health") == "OK"
 
-    # the bay is the physical slot, scoped to the device
-    assert bay.data["name"] == "Socket 1 (Intel Xeon Gold 6248R)"
+    # the bay is the stable physical slot (model lives in the module type, not the bay name)
+    assert bay.data["name"] == "Socket 1"
     assert bay.data["device"] is device
 
     # the module type is the catalog entry carrying the real CPU model + manufacturer
@@ -127,8 +133,7 @@ def test_creates_full_module_graph_for_cpu():
     assert grab(module_type, "data.manufacturer.data.name") == "Intel"
 
     # the module derives its display name from the bay (it has no name of its own)
-    assert module.get_display_name(including_second_key=True) == \
-        "Socket 1 (Intel Xeon Gold 6248R) (server01)"
+    assert module.get_display_name(including_second_key=True) == "Socket 1 (server01)"
 
 
 def test_module_sync_is_idempotent():
@@ -169,21 +174,49 @@ def test_different_model_creates_distinct_module_type():
 
     device2 = inventory.add_object(NBDevice, data={"name": "server02"}, source=source)
     source.device_object = device2
-    source.update_all_items([
-        cpu_item(full_name="Socket 1 (Intel Xeon Gold 5318Y)",
-                 model="Intel Xeon Gold 5318Y", serial="CPU-BBB")
-    ])
+    source.update_all_items([cpu_item(model="Intel Xeon Gold 5318Y", serial="CPU-BBB")])
 
     models = sorted(grab(mt, "data.model") for mt in inventory.get_all_items(NBModuleType))
     assert models == ["Intel Xeon Gold 5318Y", "Intel Xeon Gold 6248R"]
     assert len(inventory.get_all_items(NBModule)) == 2
 
 
+def test_same_bay_new_model_updates_module_type():
+    """Same device + same physical bay + a replaced CPU model across runs.
+
+    Regression for CodeRabbit PR #1: the bay must be keyed on a stable slot (not the
+    model-bearing display name), so a model swap reuses the same bay and the module
+    re-points to the new module type instead of churning the bay or keeping a stale type.
+    """
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    # first run: CPU model A installed in socket "Socket 1"
+    source.update_all_items([cpu_item(bay_name="Socket 1",
+                                      model="Intel Xeon Gold 6248R", serial="CPU-AAA")])
+
+    # second run: same device, same socket, a different CPU model is now installed
+    source.update_all_items([cpu_item(bay_name="Socket 1",
+                                      model="Intel Xeon Gold 5318Y", serial="CPU-BBB")])
+
+    bays = inventory.get_all_items(NBModuleBay)
+    modules = inventory.get_all_items(NBModule)
+
+    # the physical bay is stable: still a single bay holding a single module on the device
+    assert len(bays) == 1
+    assert len(modules) == 1
+    assert bays[0].data["name"] == "Socket 1"
+
+    module = modules[0]
+    # the module re-points to the replaced part's module type (no stale catalog reference)
+    assert grab(module, "data.module_type.data.model") == "Intel Xeon Gold 5318Y"
+    assert module.data["serial"] == "CPU-BBB"
+
+
 def test_missing_component_marks_module_health_absent():
     source, inventory, _ = make_source(True, "4.3.0")
 
-    cpu1 = cpu_item(full_name="Socket 1 (Intel Xeon Gold 6248R)", serial="CPU-AAA")
-    cpu2 = cpu_item(full_name="Socket 2 (Intel Xeon Gold 6248R)", serial="CPU-BBB")
+    cpu1 = cpu_item(bay_name="Socket 1", serial="CPU-AAA")
+    cpu2 = cpu_item(bay_name="Socket 2", serial="CPU-BBB")
     source.update_all_items([cpu1, cpu2])
 
     assert len(inventory.get_all_items(NBModule)) == 2
@@ -194,10 +227,8 @@ def test_missing_component_marks_module_health_absent():
     modules_by_bay = {
         grab(m, "data.module_bay.data.name"): m for m in inventory.get_all_items(NBModule)
     }
-    assert grab(modules_by_bay["Socket 1 (Intel Xeon Gold 6248R)"],
-                "data.custom_fields.health") == "OK"
-    assert grab(modules_by_bay["Socket 2 (Intel Xeon Gold 6248R)"],
-                "data.custom_fields.health") == "Absent"
+    assert grab(modules_by_bay["Socket 1"], "data.custom_fields.health") == "OK"
+    assert grab(modules_by_bay["Socket 2"], "data.custom_fields.health") == "Absent"
 
 
 def test_inventory_item_backend_when_feature_disabled():
