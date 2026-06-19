@@ -740,17 +740,21 @@ class CheckRedfish(SourceBase):
 
             nic_type = NetBoxInterfaceType(name)
 
+            # the adapter id (e.g. NIC.Slot.1) is the stable physical-slot identity; adapter_name
+            # may embed a mutable human label that churns the bay across runs, so prefer the id
+            stable_bay_name = adapter_id or adapter_name or "None"
+
             if adapter_id is not None:
                 self.interface_adapter_type_dict[adapter_id] = nic_type
                 # remember which module bay this adapter's NIC module lives in so its ports
                 # can be attached to the module later
-                self.nic_module_bay_by_adapter_id[adapter_id] = adapter_name or "None"
+                self.nic_module_bay_by_adapter_id[adapter_id] = stable_bay_name
 
             items.append({
                 "inventory_type": "NIC",
                 "manufacturer": manufacturer,
                 # the adapter slot is the stable module bay identity (independent of the model)
-                "bay_name": adapter_name or "None",
+                "bay_name": stable_bay_name,
                 "full_name": name,
                 # the adapter model is the module type (catalog) identifier when modeling as modules
                 "model": model,
@@ -1236,21 +1240,20 @@ class CheckRedfish(SourceBase):
             else:
                 unmatched_module_items.append(item)
 
-        # sort unmatched items by module bay name
+        # sort unmatched items by module bay name for deterministic new-module creation order
         unmatched_module_items.sort(key=lambda x: self.module_bay_name(x) or "")
 
-        # iterate over current NetBox modules
-        # if name did not match try to assign unmatched items in alphabetical order
+        # the module bay is the authoritative physical slot and update_module never moves a module
+        # between bays, so matching must be strict by bay: a current module whose bay is not in the
+        # discovered set is a removed component (mark Absent), never a target to remap another
+        # component onto - unmatched incoming items create their own new bay/module below
         for nb_module in current_modules.values():
 
-            if nb_module in matched_modules.keys():
+            if nb_module in matched_modules:
                 continue
 
-            if len(unmatched_module_items) > 0:
-                matched_modules[nb_module] = unmatched_module_items.pop(0)
-
             # set module health to absent if component can't be found in redfish inventory anymore
-            elif grab(nb_module, "data.custom_fields.health") != "Absent":
+            if grab(nb_module, "data.custom_fields.health") != "Absent":
                 nb_module.update(data={"custom_fields": {"health": "Absent"}}, source=self)
 
         # update modules with matching NetBox module

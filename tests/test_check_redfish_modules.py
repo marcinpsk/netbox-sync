@@ -234,6 +234,39 @@ def test_missing_component_marks_module_health_absent():
     assert grab(modules_by_bay["Socket 2"], "data.custom_fields.health") == "Absent"
 
 
+def test_mixed_bay_transition_does_not_remap_modules():
+    """One bay disappears while a different new bay appears in the same sync. Because the module
+    bay is the authoritative physical slot (and update_module never moves a module between bays),
+    the removed bay must go Absent and the new bay must get its own module - the new component
+    must NOT be silently remapped onto the removed slot."""
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    source.update_all_items([
+        cpu_item(bay_name="Socket 1", serial="CPU-AAA"),
+        cpu_item(bay_name="Socket 2", serial="CPU-BBB"),
+    ])
+    assert len(inventory.get_all_items(NBModule)) == 2
+
+    # Socket 2 is removed and a brand new Socket 3 appears in the same run
+    source.update_all_items([
+        cpu_item(bay_name="Socket 1", serial="CPU-AAA"),
+        cpu_item(bay_name="Socket 3", serial="CPU-CCC"),
+    ])
+
+    modules_by_bay = {
+        grab(m, "data.module_bay.data.name"): m for m in inventory.get_all_items(NBModule)
+    }
+    # three distinct bays now exist: the kept one, the removed one (Absent), and the new one
+    assert set(modules_by_bay) == {"Socket 1", "Socket 2", "Socket 3"}
+    assert grab(modules_by_bay["Socket 1"], "data.custom_fields.health") == "OK"
+    # the removed slot is marked Absent and keeps its own component data (not overwritten)
+    assert grab(modules_by_bay["Socket 2"], "data.custom_fields.health") == "Absent"
+    assert grab(modules_by_bay["Socket 2"], "data.serial") == "CPU-BBB"
+    # the new slot is its own active module carrying the new component's data
+    assert grab(modules_by_bay["Socket 3"], "data.serial") == "CPU-CCC"
+    assert grab(modules_by_bay["Socket 3"], "data.custom_fields.health") == "OK"
+
+
 def fan_item(bay_name="System Board Fan1 (ID: 0.56)", health="OK"):
     """A component that reports no manufacturer (fans, enclosures, PCIe extenders, ...)."""
     return {
@@ -395,6 +428,32 @@ def test_nic_port_interface_named_by_stable_redfish_id():
     assert "Integrated NIC 1 Port 1 Partition 1 (NIC.Integrated.1-1)" not in interfaces
     assert grab(interfaces["NIC.Integrated.1-1"], "data.description") == \
         "Integrated NIC 1 Port 1 Partition 1"
+
+
+def test_nic_module_bay_stable_when_adapter_label_changes():
+    """The NIC module bay is keyed on the stable adapter id (e.g. NIC.Slot.1), not the mutable
+    human label - so a relabeled adapter in the same physical slot reuses the bay instead of
+    churning a new one (which strict bay matching would otherwise mark the old one Absent for)."""
+    source, inventory, _ = make_source(True, "4.3.0")
+    source.interface_adapter_type_dict = {}
+    source.nic_module_bay_by_adapter_id = {}
+
+    def adapter(label):
+        return {"inventory": {"network_adapter": [
+            {"id": "NIC.Slot.1", "name": label, "model": "BCM57414", "manufacturer": "Broadcom",
+             "operation_status": "Enabled", "num_ports": "2", "serial": "NIC-AAA"}]}}
+
+    source.inventory_file_content = adapter("Broadcom Adapter")
+    source.update_network_adapter()
+    source.inventory_file_content = adapter("Broadcom Adapter rev2")
+    source.update_network_adapter()
+
+    bays = inventory.get_all_items(NBModuleBay)
+    assert len(bays) == 1
+    assert bays[0].data["name"] == "NIC.Slot.1"
+    assert len(inventory.get_all_items(NBModule)) == 1
+    # and the in-memory adapter->bay map used for interface linking is the stable id too
+    assert source.nic_module_bay_by_adapter_id["NIC.Slot.1"] == "NIC.Slot.1"
 
 
 def test_interfaces_not_attached_to_modules_when_feature_disabled():
