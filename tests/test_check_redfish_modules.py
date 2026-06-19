@@ -456,6 +456,55 @@ def test_nic_module_bay_stable_when_adapter_label_changes():
     assert source.nic_module_bay_by_adapter_id["NIC.Slot.1"] == "NIC.Slot.1"
 
 
+def test_dimm_module_bay_stable_when_dimm_type_changes():
+    """A DIMM's module bay is the stable slot (e.g. "DIMM A1"); the memory type appended to the
+    display name must not be part of the bay identity, so swapping the DIMM reuses the bay and
+    only re-points its module type instead of churning a new bay. Drives the real update_memory()."""
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    def dimm(dimm_type, part):
+        return {"inventory": {"memory": [
+            {"name": "DIMM A1", "type": dimm_type, "manufacturer": "Samsung", "part_number": part,
+             "serial": "DIMM-AAA", "size_in_mb": 32768, "speed": 3200,
+             "health_status": "OK", "operation_status": "GoodInUse"}]}}
+
+    source.inventory_file_content = dimm("DDR4", "PN-DDR4")
+    source.update_memory()
+    source.inventory_file_content = dimm("DDR5", "PN-DDR5")
+    source.update_memory()
+
+    bays = inventory.get_all_items(NBModuleBay)
+    assert len(bays) == 1
+    assert bays[0].data["name"] == "DIMM A1"
+    assert len(inventory.get_all_items(NBModule)) == 1
+    # the swap re-points the module type to the new part instead of creating a second bay
+    assert grab(inventory.get_all_items(NBModule)[0], "data.module_type.data.model") == "PN-DDR5"
+
+
+def test_physical_drive_module_bay_stable_when_model_changes():
+    """A physical drive's module bay is the stable slot; the type/model appended to the display
+    name must not churn the bay, so replacing the drive in a slot reuses the bay (a real swap also
+    brings a new serial). Drives the real update_physical_drive()."""
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    def drive(model, serial):
+        return {"inventory": {"physical_drive": [
+            {"name": "Solid State Disk", "id": "Disk.Bay.0", "location": "Slot 5", "type": "SSD",
+             "model": model, "manufacturer": "Samsung", "serial": serial, "part_number": "PN-DRV",
+             "size_in_byte": 512000000000, "health_status": "OK", "operation_status": "GoodInUse"}]}}
+
+    source.inventory_file_content = drive("MZ-A", "DRV-AAA")
+    source.update_physical_drive()
+    source.inventory_file_content = drive("MZ-B", "DRV-BBB")
+    source.update_physical_drive()
+
+    bays = inventory.get_all_items(NBModuleBay)
+    assert len(bays) == 1
+    assert bays[0].data["name"] == "Solid State Disk Slot 5"
+    assert len(inventory.get_all_items(NBModule)) == 1
+    assert grab(inventory.get_all_items(NBModule)[0], "data.serial") == "DRV-BBB"
+
+
 def test_interfaces_not_attached_to_modules_when_feature_disabled():
     """With the modules feature off, interfaces must not get a module reference."""
     source, inventory, _ = make_source(False, "4.3.0")

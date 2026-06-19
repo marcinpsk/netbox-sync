@@ -447,6 +447,10 @@ class CheckRedfish(SourceBase):
 
             memory_size_total += size_in_mb
 
+            # the slot label (e.g. "DIMM A1") is the stable module bay identity, captured before
+            # the volatile DIMM type is appended to the display name so a swap reuses the bay
+            dimm_bay = name
+
             name_details = list()
             if dimm_type is not None:
                 name_details.append(f"{dimm_type}")
@@ -468,6 +472,7 @@ class CheckRedfish(SourceBase):
             items.append({
                 "inventory_type": "DIMM",
                 "description": description,
+                "bay_name": dimm_bay or "None",
                 "full_name": name or "None",
                 "serial": get_string_or_none(grab(memory, "serial")),
                 "manufacturer": get_string_or_none(grab(memory, "manufacturer")),
@@ -582,6 +587,10 @@ class CheckRedfish(SourceBase):
 
             name = pd_name
 
+            # the drive slot (built from location/bay/id above) is the stable module bay identity,
+            # captured before the volatile type/model is appended to the display name
+            drive_bay = pd_name
+
             name_details = list()
             if pd_type is not None:
                 name_details.append(pd_type)
@@ -605,6 +614,7 @@ class CheckRedfish(SourceBase):
                 "inventory_type": "Physical Drive",
                 "description": description,
                 "manufacturer": get_string_or_none(grab(pd, "manufacturer")),
+                "bay_name": drive_bay or "None",
                 "full_name": name or "None",
                 "serial": serial,
                 "part_number": get_string_or_none(grab(pd, "part_number")),
