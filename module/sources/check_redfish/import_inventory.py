@@ -1283,9 +1283,18 @@ class CheckRedfish(SourceBase):
         a model swap would rename the bay and churn it. Parsers provide it via 'bay_name'; we
         fall back to the display name for components whose name is already slot based and does
         not embed a model.
+
+        The name is truncated to the module bay's max length (NetBox limits dcim.modulebay.name to
+        64 chars). NetBox stores the truncated name, so the key used to match an existing bay must
+        be truncated the same way - otherwise a name longer than the limit never matches its stored
+        (truncated) counterpart and the bay + module churn on every sync (the module path matches
+        strictly, with no alphabetical fallback like the inventory-item path has).
         """
 
-        return item_data.get("bay_name") or item_data.get("full_name")
+        name = item_data.get("bay_name") or item_data.get("full_name")
+        if name is not None:
+            name = name[:64]
+        return name
 
     def device_manufacturer_name(self) -> str:
         """

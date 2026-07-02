@@ -726,3 +726,112 @@ def test_inventory_item_backend_on_old_netbox_even_with_flag():
     # NetBox too old for modules -> inventory items regardless of the flag
     assert len(inventory.get_all_items(NBInventoryItem)) == 1
     assert len(inventory.get_all_items(NBModule)) == 0
+
+
+# A Dell structured `location` blob as check_redfish can hand it back: not a plain string but a
+# nested Oem dict. str()-ing it produces ~200 chars of "{'Oem': {'Dell': {'@odata.type': ...}}}".
+_DELL_LOCATION = {
+    "Oem": {
+        "Dell": {
+            "@odata.type": "#DellLocation.v1_2_0.DellLocation",
+            "Locator": "BP_PSV 0:1",
+        }
+    }
+}
+
+
+def _enclosure(location):
+    return {"inventory": {"storage_enclosure": [
+        {"name": "BP_PSV 0:1", "model": "BP14G+EXP", "location": location,
+         "manufacturer": "DELL", "serial": "ENC-AAA", "part_number": "PN-ENC",
+         "firmware": "1.0", "health_status": "OK", "num_bays": 24,
+         "operation_status": "Enabled"}]}}
+
+
+def test_get_string_or_none_rejects_structured_values():
+    """The shared parser must not stringify a nested dict/list into a name. Scalars (incl. ints,
+    which many callers rely on) keep their existing str() behavior."""
+    from module.common.misc import get_string_or_none
+
+    # structured values are not meaningful names -> None, not "{'Oem': ...}"
+    assert get_string_or_none(_DELL_LOCATION) is None
+    assert get_string_or_none(["a", "b"]) is None
+    assert get_string_or_none(("a",)) is None
+    assert get_string_or_none({1, 2}) is None
+
+    # scalars are unchanged
+    assert get_string_or_none("  Slot 5 ") == "Slot 5"
+    assert get_string_or_none(5) == "5"      # ints still stringify (cores/slot/num_ports/...)
+    assert get_string_or_none(0) == "0"
+    assert get_string_or_none(None) is None
+    assert get_string_or_none("") is None
+
+
+def test_storage_enclosure_dell_location_dict_does_not_churn_module_bay():
+    """A Dell structured `location` must not be stringified into the bay/module name: it would blow
+    past NetBox's 64-char limit, get truncated on store, then never match the (untruncated) name
+    computed on the next sync -> the bay+module is recreated every run. Modules backend uses strict
+    bay matching, so this churn is direct. Drives the real update_storage_enclosure() twice."""
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    source.inventory_file_content = _enclosure(_DELL_LOCATION)
+    source.update_storage_enclosure()
+    source.update_storage_enclosure()   # identical second sync must be idempotent
+
+    bays = inventory.get_all_items(NBModuleBay)
+    modules = inventory.get_all_items(NBModule)
+    assert len(bays) == 1
+    assert len(modules) == 1
+
+    name = bays[0].data["name"]
+    assert "Oem" not in name
+    assert "Dell" not in name
+    assert "{" not in name
+    assert len(name) <= 64
+    assert name == "BP_PSV 0:1"
+
+
+def test_storage_enclosure_dell_location_dict_not_duplicated_as_inventory_item():
+    """Same root cause on the deprecated inventory-item backend: the >64-char stringified-dict name
+    is truncated on store and re-added on the next sync. Drives the real update_storage_enclosure()
+    twice with the modules feature off."""
+    source, inventory, _ = make_source(False, "4.3.0")
+
+    source.inventory_file_content = _enclosure(_DELL_LOCATION)
+    source.update_storage_enclosure()
+    source.update_storage_enclosure()
+
+    items = inventory.get_all_items(NBInventoryItem)
+    assert len(items) == 1
+    name = items[0].data["name"]
+    assert "Oem" not in name
+    assert "Dell" not in name
+    assert "{" not in name
+    assert len(name) <= 64
+
+
+def test_long_module_bay_name_does_not_churn():
+    """A module bay name longer than NetBox's 64-char limit is truncated on store, so the match key
+    must be truncated the same way - otherwise the bay + module is recreated every sync (the module
+    path uses strict matching with no alphabetical fallback, unlike inventory items). Reproduces the
+    prod churn from a physical drive whose slot/location string exceeds 64 chars (e.g. device 5's
+    'Solid State Disk 0:1:0 RAID.SL.3-1:0:Disk.Bay.0:...'). Drives the real update_physical_drive()."""
+    source, inventory, _ = make_source(True, "4.3.0")
+
+    def drive():
+        return {"inventory": {"physical_drive": [
+            {"name": "Solid State Disk", "id": "Disk.Bay.0",
+             "location": "0:1:0 RAID.SL.3-1:0:Disk.Bay.0:Enclosure.Internal.0-1",
+             "type": "SSD", "model": "MZ7L3480", "manufacturer": "Samsung", "serial": "DRV-AAA",
+             "part_number": "PN-DRV", "size_in_byte": 480000000000,
+             "health_status": "OK", "operation_status": "GoodInUse"}]}}
+
+    source.inventory_file_content = drive()
+    source.update_physical_drive()
+    source.inventory_file_content = drive()
+    source.update_physical_drive()   # identical second sync must be idempotent
+
+    bays = inventory.get_all_items(NBModuleBay)
+    assert len(bays) == 1, [b.data["name"] for b in bays]
+    assert len(inventory.get_all_items(NBModule)) == 1
+    assert len(bays[0].data["name"]) <= 64
