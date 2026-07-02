@@ -8,6 +8,7 @@ actual CheckRedfish source methods - no mocks. The only boundary not exercised i
 REST API itself (which requires a live NetBox instance, see the plan's verification section).
 """
 
+import logging
 import types
 
 import pytest
@@ -865,3 +866,218 @@ def test_long_module_bay_names_sharing_a_prefix_do_not_collide():
     assert len(set(names)) == 2, names
     assert len(inventory.get_all_items(NBModule)) == 2
     assert all(len(n) <= 64 for n in names), names
+
+
+def _dell_system(system_serial="CNEXAMPLE00001", service_tag="ABC1234", with_chassis=True):
+    """A Dell system as check_redfish reports it: `system.serial` is the board PPID, while the
+    Service Tag (what dmidecode / OS tooling report) is exposed as `chassis.sku`."""
+    content = {"inventory": {"system": [
+        {"id": "1", "name": "System", "manufacturer": "Dell Inc.", "model": "PowerEdge R650",
+         "serial": system_serial, "host_name": "server01",
+         "health_status": "OK", "power_state": "On"}]}}
+    if with_chassis:
+        content["inventory"]["chassis"] = [{"id": "1", "sku": service_tag}]
+    return content
+
+
+def _run_update_device(source, content, dell_serial_from_service_tag):
+    source.settings.overwrite_host_name = False
+    source.settings.dell_serial_from_service_tag = dell_serial_from_service_tag
+    source.inventory_file_content = content
+    source.update_device()
+    return source.device_object
+
+
+def test_dell_serial_defaults_to_system_serial():
+    """Default (option off): the device serial is the check_redfish system serial and the Dell
+    Service Tag stays in its own custom field. Existing behavior - must not change."""
+    source, _, _ = make_source(False, "4.3.0")
+    device = _run_update_device(source, _dell_system(), dell_serial_from_service_tag=False)
+
+    assert device.data["serial"] == "CNEXAMPLE00001"
+    assert grab(device, "data.custom_fields.service_tag") == "ABC1234"
+    assert grab(device, "data.custom_fields.system_serial") is None
+
+
+def test_dell_serial_from_service_tag_option_swaps_serial_into_custom_field():
+    """Opt-in option on: the Dell Service Tag (what dmidecode/OS report) becomes the device serial
+    and the original system serial (the Dell PPID) moves to the 'system_serial' custom field."""
+    source, _, _ = make_source(False, "4.3.0")
+    device = _run_update_device(source, _dell_system(), dell_serial_from_service_tag=True)
+
+    assert device.data["serial"] == "ABC1234"
+    assert grab(device, "data.custom_fields.system_serial") == "CNEXAMPLE00001"
+    # the Service Tag is still exposed as its own custom field
+    assert grab(device, "data.custom_fields.service_tag") == "ABC1234"
+
+
+def test_dell_serial_from_service_tag_falls_back_when_no_service_tag():
+    """Option on but no Service Tag available -> serial stays the system serial (no data loss),
+    and no system_serial custom field is written."""
+    source, _, _ = make_source(False, "4.3.0")
+    device = _run_update_device(source, _dell_system(with_chassis=False),
+                                dell_serial_from_service_tag=True)
+
+    assert device.data["serial"] == "CNEXAMPLE00001"
+    assert grab(device, "data.custom_fields.system_serial") is None
+
+
+def _match_content(system_serial="CNEXAMPLE00001", service_tag="ABC1234"):
+    """Inventory file (no meta.inventory_id, so device matching falls back to the serial)."""
+    return {"inventory": {
+        "system": [{"manufacturer": "Dell Inc.", "serial": system_serial}],
+        "chassis": [{"sku": service_tag}],
+    }}
+
+
+def test_apply_matches_device_by_system_serial_when_option_disabled():
+    """Default fallback matching (option off): a device is matched by the system serial. Drives the
+    real find_device_object() against real NBDevice lookups. Regression guard - must not change."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = False
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
+
+    source.inventory_file_content = _match_content()
+
+    assert source.find_device_object("dell-host.json") is True
+    assert source.device_object is existing
+
+
+def test_apply_matches_not_yet_migrated_device_by_system_serial_with_option_on():
+    """Option on but the device's persisted serial is still the system serial (not yet migrated):
+    the system-serial fallback must still find it."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = True
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
+
+    source.inventory_file_content = _match_content()
+
+    assert source.find_device_object("dell-host.json") is True
+    assert source.device_object is existing
+
+
+def test_apply_matches_dell_device_by_service_tag_when_serial_swapped():
+    """With dell_serial_from_service_tag on, a device whose persisted serial is the Service Tag must
+    still be found by the fallback (when meta.inventory_id is unavailable). Without this the device
+    is silently skipped and stops being updated. Drives the real find_device_object()."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = True
+    # a device previously synced with the option on: its NetBox serial is the Service Tag
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "ABC1234"}, source=source)
+
+    # same box: system serial is the PPID, Service Tag is the chassis SKU, no meta.inventory_id
+    source.inventory_file_content = _match_content()
+
+    assert source.find_device_object("dell-host.json") is True
+    assert source.device_object is existing
+
+
+def test_dell_system_serial_custom_field_not_overwritten_with_none():
+    """A transient missing system serial (chassis SKU still present) must not overwrite an existing
+    system_serial custom field with None. Drives the real update_device() twice."""
+    source, _, _ = make_source(False, "4.3.0")
+    device = _run_update_device(source, _dell_system(), dell_serial_from_service_tag=True)
+    assert grab(device, "data.custom_fields.system_serial") == "CNEXAMPLE00001"
+
+    # second sync: system.serial transiently missing, Service Tag still present
+    _run_update_device(source, _dell_system(system_serial=None), dell_serial_from_service_tag=True)
+
+    assert grab(device, "data.custom_fields.system_serial") == "CNEXAMPLE00001"
+
+
+def test_dell_blank_service_tag_falls_through_to_warning():
+    """A blank/whitespace-only chassis SKU is not a valid Service Tag: no service_tag custom field
+    is written and the serial stays the system serial (covers the get_string_or_none hardening)."""
+    source, _, _ = make_source(False, "4.3.0")
+    device = _run_update_device(source, _dell_system(service_tag="   "),
+                                dell_serial_from_service_tag=True)
+
+    assert grab(device, "data.custom_fields.service_tag") is None
+    assert device.data["serial"] == "CNEXAMPLE00001"
+    assert grab(device, "data.custom_fields.system_serial") is None
+
+
+def test_apply_matches_device_when_system_serial_has_padding():
+    """update_device() stores the serial stripped (get_string_or_none), so the fallback lookup must
+    normalize the Redfish serial too - otherwise a padded serial won't match the stored device."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = False
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
+
+    # Redfish reports the same serial with surrounding whitespace
+    source.inventory_file_content = _match_content(system_serial="  CNEXAMPLE00001  ")
+
+    assert source.find_device_object("dell-host.json") is True
+    assert source.device_object is existing
+
+
+def test_apply_matches_device_by_service_tag_when_system_serial_missing():
+    """Option on and no system serial in the inventory: matching must resolve by Service Tag and
+    must NOT probe serial=None first (which would wrongly match a serial-less device)."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = True
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "ABC1234"}, source=source)
+
+    source.inventory_file_content = _match_content(system_serial=None)
+
+    assert source.find_device_object("dell-host.json") is True
+    assert source.device_object is existing
+
+
+def test_apply_matches_service_tag_device_even_when_option_disabled():
+    """A device persisted with the Service Tag as its serial (from a prior run with the option on)
+    must still match after the option is later disabled - otherwise it is stranded and silently
+    dropped every sync. Service Tag matching must not depend on the current option value."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = False   # option now OFF
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "ABC1234"}, source=source)  # serial == Service Tag
+
+    # inventory file: system serial is the PPID, Service Tag is the chassis SKU, no meta.inventory_id
+    source.inventory_file_content = _match_content()
+
+    assert source.find_device_object("dell-host.json") is True
+    assert source.device_object is existing
+
+
+def test_absent_inventory_id_does_not_warn_and_still_matches_by_serial(caplog):
+    """meta.inventory_id is optional - devices are commonly matched by serial / Service Tag instead
+    (server-lifecycle omits it). An absent id must NOT emit the 'must be an integer' warning, and the
+    match must still fall through to the serial. Drives the real find_device_object() + real logger."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = False
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
+
+    source.inventory_file_content = _match_content()   # no meta.inventory_id
+
+    with caplog.at_level(logging.WARNING, logger="NetBox-Sync"):
+        assert source.find_device_object("dell-host.json") is True
+
+    assert source.device_object is existing
+    assert not [r.message for r in caplog.records if "meta.inventory_id" in r.message], \
+        [r.message for r in caplog.records]
+
+
+def test_invalid_inventory_id_warns_but_still_matches_by_serial(caplog):
+    """A genuinely invalid (non-integer) meta.inventory_id must still warn, but must not short-circuit
+    the serial fallback: the device is resolved by its serial regardless of the bad id."""
+    source, inventory, _ = make_source(False, "4.3.0")
+    source.settings.dell_serial_from_service_tag = False
+    existing = inventory.add_object(
+        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
+
+    content = _match_content()
+    content["meta"] = {"inventory_id": "not-an-int"}
+    source.inventory_file_content = content
+
+    with caplog.at_level(logging.WARNING, logger="NetBox-Sync"):
+        assert source.find_device_object("dell-host.json") is True
+
+    assert source.device_object is existing
+    assert [r.message for r in caplog.records if "meta.inventory_id" in r.message]
