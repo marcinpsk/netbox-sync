@@ -25,6 +25,7 @@ from module.netbox.object_classes import (
     NBInventoryItem,
     NBManufacturer,
     NBPowerPort,
+    NBIPAddress,
 )
 from module.sources.check_redfish.import_inventory import CheckRedfish
 
@@ -1081,3 +1082,27 @@ def test_invalid_inventory_id_warns_but_still_matches_by_serial(caplog):
 
     assert source.device_object is existing
     assert [r.message for r in caplog.records if "meta.inventory_id" in r.message]
+
+
+def test_add_update_interface_keeps_ip_when_no_ips_discovered():
+    """netbox-sync must not strip an existing IP from an interface when it discovered no IPs for it.
+    Redfish only reports the BMC IP, so an OS bond/bridge (e.g. pnet0) holding the management IP -
+    matched only by a shared MAC - would otherwise lose it, clearing the device primary IP. Drives
+    the real add_update_interface() removal loop against real NBInterface/NBIPAddress objects."""
+    source, inventory, device = make_source(True, "4.3.0")
+    source.settings.ip_tenant_inheritance_order = []
+    source.settings.permitted_subnets = None
+
+    iface = inventory.add_object(NBInterface, data={"name": "pnet0", "device": device}, source=source)
+    ip = inventory.add_object(
+        NBIPAddress, data={"address": "172.10.10.12/24", "assigned_object_id": iface}, source=source)
+    assert ip in iface.get_ip_addresses()
+
+    # rediscovering the interface with NO IPs must keep the existing management IP: the removal is
+    # skipped, so the IP is not queued for de-assignment (unset_attribute queues via unset_items)
+    source.add_update_interface(iface, device, {"name": "pnet0"}, [], keep_undiscovered_ips=True)
+    assert "assigned_object_id" not in ip.unset_items
+
+    # default behavior (used by other sources) still strips an IP that is no longer reported
+    source.add_update_interface(iface, device, {"name": "pnet0"}, [])
+    assert "assigned_object_id" in ip.unset_items

@@ -232,7 +232,7 @@ class SourceBase:
         return current_longest_matching_prefix
 
     def add_update_interface(self, interface_object, device_object, interface_data, interface_ips=None,
-                             vmware_object=None):
+                             vmware_object=None, keep_undiscovered_ips=False):
         """
         Adds/Updates an interface to/of a NBVM or NBDevice including IP addresses.
         Validates/enriches data in following order:
@@ -257,6 +257,10 @@ class SourceBase:
             a list of ip addresses which are assigned to this interface
         vmware_object: vim.HostSystem | vim.VirtualMachine
             object to add to list of objects to reevaluate
+        keep_undiscovered_ips: bool
+            if True, do not strip existing IPs from an interface when the source discovered no IPs
+            for it. check_redfish only reports the BMC IP, so host NIC / bond / bridge interfaces
+            (matched by a shared MAC) would otherwise lose their management IP on every sync.
 
         Returns
         -------
@@ -593,9 +597,14 @@ class SourceBase:
 
             ip_address_objects.append(this_ip_object)
 
+        # when the source discovered no IPs for this interface, optionally leave the existing IPs in
+        # place instead of stripping them (see keep_undiscovered_ips): removing them would delete
+        # management IPs from host NIC / bond / bridge interfaces the source only matched by MAC
+        skip_ip_removal = keep_undiscovered_ips is True and len(ip_address_objects) == 0
+
         for current_ip in interface_object.get_ip_addresses():
 
-            if skip_ip_handling is True:
+            if skip_ip_handling is True or skip_ip_removal is True:
                 continue
 
             if grab(current_ip, "data.role.value") == "anycast":
