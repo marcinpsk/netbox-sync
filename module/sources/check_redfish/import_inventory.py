@@ -1073,7 +1073,11 @@ class CheckRedfish(SourceBase):
 
                 port_data = data_to_update
 
-            self.add_update_interface(nic_object, self.device_object, port_data, nic_ips.get(port_name, list()))
+            # Redfish only reliably reports the BMC IP, so never strip existing IPs from an interface
+            # we discovered no IPs for - host NIC / bond / bridge interfaces matched by a shared MAC
+            # (e.g. an OS pnet0/bond0 holding the management IP) must keep their IPs
+            self.add_update_interface(nic_object, self.device_object, port_data,
+                                      nic_ips.get(port_name, list()), keep_undiscovered_ips=True)
 
     def update_manager(self):
 
