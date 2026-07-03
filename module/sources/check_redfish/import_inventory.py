@@ -9,6 +9,7 @@
 
 import os
 import glob
+import hashlib
 import json
 
 from packaging import version
@@ -22,6 +23,12 @@ from module.netbox.inventory import NetBoxInventory
 from module.netbox import *
 
 log = get_logger()
+
+# NetBox limits dcim.modulebay.name to 64 chars. A name longer than this is shortened to a stable
+# prefix plus a short hash of the full name, so two distinct slots that share the first 64 chars
+# still resolve to different bay identities instead of collapsing onto one (see module_bay_name()).
+MODULE_BAY_NAME_MAX_LENGTH = 64
+MODULE_BAY_NAME_HASH_LENGTH = 8
 
 
 class CheckRedfish(SourceBase):
@@ -1283,9 +1290,23 @@ class CheckRedfish(SourceBase):
         a model swap would rename the bay and churn it. Parsers provide it via 'bay_name'; we
         fall back to the display name for components whose name is already slot based and does
         not embed a model.
+
+        The name is shortened to the module bay's max length (NetBox limits dcim.modulebay.name to
+        64 chars). NetBox stores the shortened name, so the key used to match an existing bay must
+        be shortened the same way - otherwise a name longer than the limit never matches its stored
+        counterpart and the bay + module churn on every sync (the module path matches strictly, with
+        no alphabetical fallback like the inventory-item path has). Shortening keeps a prefix and
+        appends a deterministic hash of the full name so two distinct slots that happen to share the
+        first 64 chars (e.g. long drive/enclosure location strings) do not collapse onto one bay.
         """
 
-        return item_data.get("bay_name") or item_data.get("full_name")
+        name = item_data.get("bay_name") or item_data.get("full_name")
+        if name is not None and len(name) > MODULE_BAY_NAME_MAX_LENGTH:
+            digest = hashlib.blake2s(name.encode("utf-8"),
+                                     digest_size=MODULE_BAY_NAME_HASH_LENGTH // 2).hexdigest()
+            prefix_length = MODULE_BAY_NAME_MAX_LENGTH - MODULE_BAY_NAME_HASH_LENGTH - 1
+            name = f"{name[:prefix_length]}-{digest}"
+        return name
 
     def device_manufacturer_name(self) -> str:
         """

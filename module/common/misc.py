@@ -159,6 +159,12 @@ def get_string_or_none(text=None):
     """
     Only return stripped content of text if text is not None and not empty
 
+    Structured values (dict/list/set/tuple) are not meaningful names and are rejected with None.
+    Blindly str()-ing them (e.g. a Dell `location` Oem blob) would inject the whole repr into a
+    component name, blow past NetBox's 64-char limit, get truncated on store and then never match
+    on the next sync - recreating the item every run. Scalars (incl. ints, which many callers rely
+    on) keep their str() behavior.
+
     Parameters
     ----------
     text: str
@@ -168,6 +174,9 @@ def get_string_or_none(text=None):
     -------
     (str, None): content of text
     """
+
+    if isinstance(text, (dict, list, set, tuple)):
+        return None
 
     if text is not None and len(str(text).strip()) > 0:
         return str(text).strip()
