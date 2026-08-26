@@ -268,6 +268,15 @@ class NetBoxHandler:
             if "limit" not in params.keys():
                 params["limit"] = self.settings.default_netbox_result_limit
 
+            # Results are paginated with limit/offset. Several models order by a non-unique
+            # key (dcim.modulebay by (device, name)), and rows tied on that key have no stable
+            # position between two queries, so a tied row can be returned twice while another
+            # is never returned at all. A row that is never returned looks absent to the sync,
+            # which then creates a duplicate of it. Order by the primary key so the sort is
+            # total and every row is walked exactly once.
+            if nb_id is None and "ordering" not in params:
+                params["ordering"] = "id"
+
             # always exclude config context
             params["exclude"] = "config_context"
 
