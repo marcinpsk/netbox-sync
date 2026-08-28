@@ -413,7 +413,6 @@ class CheckRedfish(SourceBase):
 
             # compile inventory item data
             ps_items.append({
-                "inventory_type": "Power Supply",
                 "health": health_status,
                 "description": description,
                 # the supply's slot is the stable module bay identity, independent of the volatile
@@ -468,7 +467,7 @@ class CheckRedfish(SourceBase):
 
             ps_index += 1
 
-        self.update_all_items(ps_items)
+        self.update_all_items(ps_items, "Power Supply")
 
         # link each power port to its power-supply module (so NetBox cascade-deletes the port when
         # the module is removed, mirroring how NIC ports hang off their adapter module) or detach a
@@ -493,27 +492,20 @@ class CheckRedfish(SourceBase):
             health_status = get_string_or_none(grab(fan, "health_status"))
             physical_context = get_string_or_none(grab(fan, "physical_context"))
             fan_id = get_string_or_none(grab(fan, "id"))
-            reading = get_string_or_none(grab(fan, "reading"))
-            reading_unit = get_string_or_none(grab(fan, "reading_unit"))
 
             description = list()
-            speed = None
             if physical_context is not None:
                 description.append(f"Context: {physical_context}")
 
-            if reading is not None and reading_unit is not None:
-                reading_unit = "%" if reading_unit.lower() == "percent" else reading_unit
-                speed = f"{reading}{reading_unit}"
-
+            # the fan reading is a live measurement and is deliberately not stored: it changes on
+            # every scan, so keeping it here rewrote every fan module on every run
             items.append({
-                "inventory_type": "Fan",
                 "description": description,
                 "full_name": f"{fan_name} (ID: {fan_id})",
-                "health": health_status,
-                "speed": speed
+                "health": health_status
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "Fan")
 
     def update_memory(self):
 
@@ -561,7 +553,6 @@ class CheckRedfish(SourceBase):
                 speed = f"{speed}MHz"
 
             items.append({
-                "inventory_type": "DIMM",
                 "description": description,
                 "bay_name": dimm_bay or "None",
                 "full_name": name or "None",
@@ -573,7 +564,7 @@ class CheckRedfish(SourceBase):
                 "speed": speed,
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "DIMM")
 
         if memory_size_total > 0:
             memory_size_total = memory_size_total / 1024
@@ -622,7 +613,6 @@ class CheckRedfish(SourceBase):
                 description.append(f"Threads: {threads}")
 
             items.append({
-                "inventory_type": "CPU",
                 "description": description,
                 "manufacturer": get_string_or_none(grab(processor, "manufacturer")),
                 # the socket is the stable module bay identity (independent of the installed model)
@@ -636,7 +626,7 @@ class CheckRedfish(SourceBase):
                 "speed": current_speed
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "CPU")
 
         if num_cores > 0:
             custom_fields_data = {"custom_fields": {"host_cpu_cores": f"{num_cores} {cpu_name}"}}
@@ -702,7 +692,6 @@ class CheckRedfish(SourceBase):
                 speed = f"{speed_in_rpm}RPM"
 
             items.append({
-                "inventory_type": "Physical Drive",
                 "description": description,
                 "manufacturer": get_string_or_none(grab(pd, "manufacturer")),
                 "bay_name": drive_bay or "None",
@@ -715,7 +704,7 @@ class CheckRedfish(SourceBase):
                 "speed": speed
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "Physical Drive")
 
     def update_storage_controller(self):
 
@@ -749,7 +738,6 @@ class CheckRedfish(SourceBase):
                 size = f"{cache_size_in_mb}MB"
 
             items.append({
-                "inventory_type": "Storage Controller",
                 "description": description,
                 "manufacturer": get_string_or_none(grab(sc, "manufacturer")),
                 "full_name": name or "None",
@@ -759,7 +747,7 @@ class CheckRedfish(SourceBase):
                 "size": size
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "Storage Controller")
 
     def update_storage_enclosure(self):
 
@@ -785,7 +773,6 @@ class CheckRedfish(SourceBase):
                 size = f"Bays: {num_bays}"
 
             items.append({
-                "inventory_type": "Storage Enclosure",
                 "manufacturer": get_string_or_none(grab(se, "manufacturer")),
                 "full_name": name or "None",
                 "serial": get_string_or_none(grab(se, "serial")),
@@ -794,7 +781,7 @@ class CheckRedfish(SourceBase):
                 "size": size
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "Storage Enclosure")
 
     def update_network_adapter(self):
 
@@ -852,7 +839,6 @@ class CheckRedfish(SourceBase):
                 self.nic_module_bay_by_adapter_id[adapter_id] = stable_bay_name
 
             items.append({
-                "inventory_type": "NIC",
                 "manufacturer": manufacturer,
                 # the adapter slot is the stable module bay identity (independent of the model)
                 "bay_name": stable_bay_name,
@@ -867,7 +853,7 @@ class CheckRedfish(SourceBase):
                 "speed": nic_type.get_speed_human()
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "NIC")
 
     def find_device_module_by_bay_name(self, bay_name: str) -> NBModule:
         """Return the module installed in the named bay on the current device, or None."""
@@ -1102,7 +1088,6 @@ class CheckRedfish(SourceBase):
                 description = f"Licenses: %s" % (", ".join(licenses))
 
             items.append({
-                "inventory_type": "Manager",
                 "description": description,
                 "full_name": name,
                 "manufacturer": grab(self.device_object, "data.device_type.data.manufacturer.data.name"),
@@ -1110,7 +1095,7 @@ class CheckRedfish(SourceBase):
                 "health": get_string_or_none(grab(manager, "health_status"))
             })
 
-        self.update_all_items(items)
+        self.update_all_items(items, "Manager")
 
     def use_modules(self) -> bool:
         """
@@ -1130,7 +1115,7 @@ class CheckRedfish(SourceBase):
 
         return version.parse(self.inventory.netbox_api_version) >= version.parse("4.3")
 
-    def update_all_items(self, items):
+    def update_all_items(self, items, inventory_type):
         """
         Updates all inventory items of a certain type. Both (current and supplied list of items) will
         be sorted by name and matched 1:1.
@@ -1139,6 +1124,11 @@ class CheckRedfish(SourceBase):
         ----------
         items: list
             a list of items to update
+        inventory_type: str
+            the component type this batch describes (CPU, DIMM, Fan, ...). The caller passes it
+            instead of it being read back from the items, so an empty batch still says which
+            components it is about: those components are gone and must be marked absent. An empty
+            batch that returned early left them untouched, and untouched objects are orphan tagged.
 
         Returns
         -------
@@ -1148,19 +1138,14 @@ class CheckRedfish(SourceBase):
         if not isinstance(items, list):
             raise ValueError(f"Value for 'items' must be type 'list' got: {items}")
 
-        if len(items) == 0:
-            return
+        # the type identifies which of the device's components this batch is about and is also
+        # stored on each of them; stamp it here so lookup and stored value cannot drift apart
+        for item in items:
+            item["inventory_type"] = inventory_type
 
         # model components as NetBox modules instead of the deprecated inventory items
         if self.use_modules() is True:
-            return self.update_all_modules(items)
-
-        # get device
-        inventory_type = grab(items, "0.inventory_type")
-
-        if inventory_type is None:
-            log.error(f"Unable to find inventory type for inventory item {items[0]}")
-            return
+            return self.update_all_modules(items, inventory_type)
 
         # get current inventory items for this device and type
         current_inventory_items = dict()
@@ -1201,8 +1186,9 @@ class CheckRedfish(SourceBase):
                 if len(unmatched_inventory_items) > 0:
                     matched_inventory[nb_inventory_item] = unmatched_inventory_items.pop(0)
 
-                # set item health to absent if item can't be found in redfish inventory anymore
-                elif grab(nb_inventory_item, "data.custom_fields.health") != "Absent":
+                # the item is gone from the redfish inventory: say so. This is not conditional on
+                # the health actually changing - an object a run does not touch is orphan tagged.
+                else:
                     nb_inventory_item.update(data={"custom_fields": {"health": "Absent"}}, source=self)
 
         # update items with matching NetBox inventory item
@@ -1301,7 +1287,7 @@ class CheckRedfish(SourceBase):
 
         return dict(sorted(current_modules.items()))
 
-    def update_all_modules(self, items):
+    def update_all_modules(self, items, inventory_type):
         """
         Module based counterpart of 'update_all_items'. Updates all modules of a certain type.
         Each component is represented by a module bay (the slot) holding a single module which is
@@ -1314,18 +1300,13 @@ class CheckRedfish(SourceBase):
         ----------
         items: list
             a list of items to update
+        inventory_type: str
+            the component type this batch describes (CPU, DIMM, Fan, ...)
 
         Returns
         -------
         None
         """
-
-        # get the component type of this batch of items (CPU, DIMM, Fan, ...)
-        inventory_type = grab(items, "0.inventory_type")
-
-        if inventory_type is None:
-            log.error(f"Unable to find inventory type for module item {items[0]}")
-            return
 
         # get current modules for this device and type, keyed by their module bay name
         current_modules = self.get_current_modules_by_bay_name(inventory_type)
@@ -1357,9 +1338,11 @@ class CheckRedfish(SourceBase):
             if nb_module in matched_modules:
                 continue
 
-            # set module health to absent if component can't be found in redfish inventory anymore
-            if grab(nb_module, "data.custom_fields.health") != "Absent":
-                nb_module.update(data={"custom_fields": {"health": "Absent"}}, source=self)
+            # the component is gone but its slot remains: record that on the module and keep both
+            # it and its bay registered with this source. Marking is not conditional on a value
+            # changing - an object a run does not touch is orphan tagged.
+            nb_module.update(data={"custom_fields": {"health": "Absent"}}, source=self)
+            self.mark_module_bay_seen(nb_module)
 
         # update modules with matching NetBox module
         for module_object, module_data in matched_modules.items():
@@ -1473,6 +1456,9 @@ class CheckRedfish(SourceBase):
             self.create_module(item_data, description, module_custom_fields)
             return
 
+        # the bay is the slot the module sits in and is still present, so mark it seen too
+        self.upsert_module_bay(item_data, description)
+
         # update an existing module; re-point the module type in case the installed part was
         # replaced with a different model in the same bay
         module_data = {
@@ -1485,6 +1471,40 @@ class CheckRedfish(SourceBase):
             module_data["description"] = description
 
         module_object.update(data=module_data, source=self)
+
+    def upsert_module_bay(self, item_data: dict, description: str) -> NBModuleBay:
+        """
+        Add or update the module bay (the physical slot) of a component and mark it as seen by
+        this source.
+
+        Both the create and the update path go through here. tag_all_the_things() adds the
+        orphaned tag to every object carrying the primary tag whose source is unset after a run,
+        so a bay that a run never touches is tagged orphaned even while the module installed in
+        it stays healthy.
+        """
+
+        module_bay_data = {
+            "device": self.device_object,
+            "name": self.module_bay_name(item_data)
+        }
+        if item_data.get("label") is not None:
+            module_bay_data["label"] = item_data.get("label")
+        if description is not None and len(description) > 0:
+            module_bay_data["description"] = description
+
+        return self.inventory.add_update_object(NBModuleBay, data=module_bay_data, source=self)
+
+    def mark_module_bay_seen(self, module_object: NBModule) -> None:
+        """
+        Register the bay a module sits in with this source without changing it. The slot outlives
+        the component installed in it, so it must not be orphan tagged once that component is gone.
+        """
+
+        module_bay = grab(module_object, "data.module_bay")
+        if module_bay is None:
+            return
+
+        module_bay.update(data={"name": grab(module_bay, "data.name")}, source=self)
 
     def create_module(self, item_data: dict, description: str, module_custom_fields: dict):
         """
@@ -1508,16 +1528,7 @@ class CheckRedfish(SourceBase):
 
         # the module bay represents the physical slot the component lives in; it is keyed on a
         # stable slot identifier so a later model swap reuses the same bay instead of churning it
-        module_bay_data = {
-            "device": self.device_object,
-            "name": self.module_bay_name(item_data)
-        }
-        if item_data.get("label") is not None:
-            module_bay_data["label"] = item_data.get("label")
-        if has_description is True:
-            module_bay_data["description"] = description
-
-        module_bay = self.inventory.add_update_object(NBModuleBay, data=module_bay_data, source=self)
+        module_bay = self.upsert_module_bay(item_data, description)
 
         # the module is the actual installed component
         module_data = {
