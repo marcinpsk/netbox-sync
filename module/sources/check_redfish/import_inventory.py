@@ -1473,6 +1473,9 @@ class CheckRedfish(SourceBase):
             self.create_module(item_data, description, module_custom_fields)
             return
 
+        # the bay is the slot the module sits in and is still present, so mark it seen too
+        self.upsert_module_bay(item_data, description)
+
         # update an existing module; re-point the module type in case the installed part was
         # replaced with a different model in the same bay
         module_data = {
@@ -1485,6 +1488,28 @@ class CheckRedfish(SourceBase):
             module_data["description"] = description
 
         module_object.update(data=module_data, source=self)
+
+    def upsert_module_bay(self, item_data: dict, description: str) -> NBModuleBay:
+        """
+        Add or update the module bay (the physical slot) of a component and mark it as seen by
+        this source.
+
+        Both the create and the update path go through here. tag_all_the_things() adds the
+        orphaned tag to every object carrying the primary tag whose source is unset after a run,
+        so a bay that a run never touches is tagged orphaned even while the module installed in
+        it stays healthy.
+        """
+
+        module_bay_data = {
+            "device": self.device_object,
+            "name": self.module_bay_name(item_data)
+        }
+        if item_data.get("label") is not None:
+            module_bay_data["label"] = item_data.get("label")
+        if description is not None and len(description) > 0:
+            module_bay_data["description"] = description
+
+        return self.inventory.add_update_object(NBModuleBay, data=module_bay_data, source=self)
 
     def create_module(self, item_data: dict, description: str, module_custom_fields: dict):
         """
@@ -1508,16 +1533,7 @@ class CheckRedfish(SourceBase):
 
         # the module bay represents the physical slot the component lives in; it is keyed on a
         # stable slot identifier so a later model swap reuses the same bay instead of churning it
-        module_bay_data = {
-            "device": self.device_object,
-            "name": self.module_bay_name(item_data)
-        }
-        if item_data.get("label") is not None:
-            module_bay_data["label"] = item_data.get("label")
-        if has_description is True:
-            module_bay_data["description"] = description
-
-        module_bay = self.inventory.add_update_object(NBModuleBay, data=module_bay_data, source=self)
+        module_bay = self.upsert_module_bay(item_data, description)
 
         # the module is the actual installed component
         module_data = {

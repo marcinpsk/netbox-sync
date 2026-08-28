@@ -1106,3 +1106,62 @@ def test_add_update_interface_keeps_ip_when_no_ips_discovered():
     # default behavior (used by other sources) still strips an IP that is no longer reported
     source.add_update_interface(iface, device, {"name": "pnet0"}, [])
     assert "assigned_object_id" in ip.unset_items
+
+
+def _seed_existing_module_graph(source, inventory, device,
+                                bay_name="Socket 1",
+                                model="Intel Xeon Gold 6248R",
+                                serial="CPU-AAA"):
+    """
+    Seed a module graph the way query_current_data() does: objects that already exist in
+    NetBox are read into the inventory with read_from_netbox=True and therefore carry no
+    source until a run of that source touches them.
+    """
+
+    manufacturer = inventory.add_object(NBManufacturer, data={"name": "Intel"}, read_from_netbox=True)
+    module_type = inventory.add_object(NBModuleType,
+                                       data={"model": model, "manufacturer": manufacturer},
+                                       read_from_netbox=True)
+    bay = inventory.add_object(NBModuleBay,
+                               data={"device": device, "name": bay_name},
+                               read_from_netbox=True)
+    module = inventory.add_object(NBModule,
+                                  data={
+                                      "device": device,
+                                      "module_bay": bay,
+                                      "module_type": module_type,
+                                      "status": "active",
+                                      "serial": serial,
+                                      "custom_fields": {"inventory_type": "CPU"},
+                                  },
+                                  read_from_netbox=True)
+
+    assert bay.source is None
+    assert module.source is None
+
+    return bay, module
+
+
+def test_existing_module_bay_is_marked_seen_by_the_source():
+    """
+    A component whose module already exists must still mark its module bay as seen.
+
+    tag_all_the_things() adds the orphaned tag to every object carrying the primary tag whose
+    source is None after a run. update_module() re-registered only the module, never the bay it
+    is installed in, so on every device whose modules already existed the bays were tagged
+    orphaned on every run and never recovered: 571 bays were tagged while the 482 modules
+    installed in them stayed healthy.
+    """
+
+    source, inventory, device = make_source(True, "4.3.0")
+    bay, module = _seed_existing_module_graph(source, inventory, device)
+
+    source.update_all_items([cpu_item()])
+
+    # the existing objects are reused, not duplicated
+    assert len(inventory.get_all_items(NBModule)) == 1
+    assert len(inventory.get_all_items(NBModuleBay)) == 1
+
+    # the module is seen by the source, and so is the bay it is installed in
+    assert module.source is source
+    assert bay.source is source, "module bay was not marked as seen -> it gets orphan tagged"
