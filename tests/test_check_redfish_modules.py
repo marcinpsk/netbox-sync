@@ -1200,6 +1200,35 @@ def _seed_fan_module(source, inventory, device, health="OK", inventory_speed=Non
                                                       "inventory_speed": inventory_speed})
 
 
+def test_live_fan_reading_is_not_stored_and_does_not_churn():
+    """
+    A fan reading changes on every scan. Storing it on the module rewrote every fan module on
+    every run: 314 of 314 module updates over two days were inventory_speed going from one RPM
+    value to another. Readings are telemetry and belong in monitoring, not in the inventory.
+    """
+
+    source, inventory, device = make_source(True, "4.3.0")
+    bay, module = _seed_fan_module(source, inventory, device, inventory_speed="5700RPM")
+
+    # first run clears the reading stored by earlier versions
+    source.inventory_file_content = _fan_inventory("5700")
+    source.update_fan()
+
+    assert grab(module, "data.custom_fields.inventory_speed") is None
+
+    # from here on a changed reading must not produce another write
+    module.updated_items = list()
+    source.inventory_file_content = _fan_inventory("5670")
+    source.update_fan()
+
+    assert module.updated_items == [], "a changed fan reading still rewrites the module"
+
+    # the component itself is still tracked
+    assert grab(module, "data.custom_fields.health") == "OK"
+    assert module.source is source
+    assert bay.source is source
+
+
 def test_component_type_missing_from_scan_marks_modules_absent_instead_of_orphaning():
     """
     update_all_items() returned early on an empty batch, so when a scan reported no component of
