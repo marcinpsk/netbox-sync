@@ -70,7 +70,6 @@ def cpu_item(bay_name="Socket 1",
     display name and by default embeds the model, exactly like the real parser does.
     """
     return {
-        "inventory_type": "CPU",
         "description": ["x86-64", "Cores: 24", "Threads: 48"],
         "manufacturer": manufacturer,
         "bay_name": bay_name,
@@ -100,7 +99,7 @@ def test_use_modules_decision_matrix(flag, api_version, expected):
 def test_creates_full_module_graph_for_cpu():
     source, inventory, device = make_source(True, "4.3.0")
 
-    source.update_all_items([cpu_item()])
+    source.update_all_items([cpu_item()], "CPU")
 
     modules = inventory.get_all_items(NBModule)
     bays = inventory.get_all_items(NBModuleBay)
@@ -144,8 +143,8 @@ def test_creates_full_module_graph_for_cpu():
 def test_module_sync_is_idempotent():
     source, inventory, _ = make_source(True, "4.3.0")
 
-    source.update_all_items([cpu_item()])
-    source.update_all_items([cpu_item()])
+    source.update_all_items([cpu_item()], "CPU")
+    source.update_all_items([cpu_item()], "CPU")
 
     # a second run with identical data must not create duplicates
     assert len(inventory.get_all_items(NBModule)) == 1
@@ -157,12 +156,12 @@ def test_same_model_reuses_module_type_across_devices():
     source, inventory, _ = make_source(True, "4.3.0")
 
     # first device gets a CPU
-    source.update_all_items([cpu_item(serial="CPU-AAA")])
+    source.update_all_items([cpu_item(serial="CPU-AAA")], "CPU")
 
     # a second device with the exact same CPU model
     device2 = inventory.add_object(NBDevice, data={"name": "server02"}, source=source)
     source.device_object = device2
-    source.update_all_items([cpu_item(serial="CPU-BBB")])
+    source.update_all_items([cpu_item(serial="CPU-BBB")], "CPU")
 
     # the module type (catalog entry) is shared, but each device gets its own bay + module
     assert len(inventory.get_all_items(NBModuleType)) == 1
@@ -175,11 +174,11 @@ def test_different_model_creates_distinct_module_type():
     """This is the 'one server type, different CPUs' use case."""
     source, inventory, _ = make_source(True, "4.3.0")
 
-    source.update_all_items([cpu_item(model="Intel Xeon Gold 6248R", serial="CPU-AAA")])
+    source.update_all_items([cpu_item(model="Intel Xeon Gold 6248R", serial="CPU-AAA")], "CPU")
 
     device2 = inventory.add_object(NBDevice, data={"name": "server02"}, source=source)
     source.device_object = device2
-    source.update_all_items([cpu_item(model="Intel Xeon Gold 5318Y", serial="CPU-BBB")])
+    source.update_all_items([cpu_item(model="Intel Xeon Gold 5318Y", serial="CPU-BBB")], "CPU")
 
     models = sorted(grab(mt, "data.model") for mt in inventory.get_all_items(NBModuleType))
     assert models == ["Intel Xeon Gold 5318Y", "Intel Xeon Gold 6248R"]
@@ -197,11 +196,11 @@ def test_same_bay_new_model_updates_module_type():
 
     # first run: CPU model A installed in socket "Socket 1"
     source.update_all_items([cpu_item(bay_name="Socket 1",
-                                      model="Intel Xeon Gold 6248R", serial="CPU-AAA")])
+                                      model="Intel Xeon Gold 6248R", serial="CPU-AAA")], "CPU")
 
     # second run: same device, same socket, a different CPU model is now installed
     source.update_all_items([cpu_item(bay_name="Socket 1",
-                                      model="Intel Xeon Gold 5318Y", serial="CPU-BBB")])
+                                      model="Intel Xeon Gold 5318Y", serial="CPU-BBB")], "CPU")
 
     bays = inventory.get_all_items(NBModuleBay)
     modules = inventory.get_all_items(NBModule)
@@ -222,12 +221,12 @@ def test_missing_component_marks_module_health_absent():
 
     cpu1 = cpu_item(bay_name="Socket 1", serial="CPU-AAA")
     cpu2 = cpu_item(bay_name="Socket 2", serial="CPU-BBB")
-    source.update_all_items([cpu1, cpu2])
+    source.update_all_items([cpu1, cpu2], "CPU")
 
     assert len(inventory.get_all_items(NBModule)) == 2
 
     # second CPU disappears from the inventory file
-    source.update_all_items([cpu1])
+    source.update_all_items([cpu1], "CPU")
 
     modules_by_bay = {
         grab(m, "data.module_bay.data.name"): m for m in inventory.get_all_items(NBModule)
@@ -246,14 +245,14 @@ def test_mixed_bay_transition_does_not_remap_modules():
     source.update_all_items([
         cpu_item(bay_name="Socket 1", serial="CPU-AAA"),
         cpu_item(bay_name="Socket 2", serial="CPU-BBB"),
-    ])
+    ], "CPU")
     assert len(inventory.get_all_items(NBModule)) == 2
 
     # Socket 2 is removed and a brand new Socket 3 appears in the same run
     source.update_all_items([
         cpu_item(bay_name="Socket 1", serial="CPU-AAA"),
         cpu_item(bay_name="Socket 3", serial="CPU-CCC"),
-    ])
+    ], "CPU")
 
     modules_by_bay = {
         grab(m, "data.module_bay.data.name"): m for m in inventory.get_all_items(NBModule)
@@ -272,7 +271,6 @@ def test_mixed_bay_transition_does_not_remap_modules():
 def fan_item(bay_name="System Board Fan1 (ID: 0.56)", health="OK"):
     """A component that reports no manufacturer (fans, enclosures, PCIe extenders, ...)."""
     return {
-        "inventory_type": "Fan",
         "description": ["Context: SystemBoard"],
         "full_name": bay_name,
         "health": health,
@@ -292,7 +290,7 @@ def test_component_without_manufacturer_uses_device_manufacturer():
         NBDeviceType, data={"model": "PowerEdge R650", "manufacturer": manufacturer}, source=source)
     device.update(data={"device_type": device_type}, source=source)
 
-    source.update_all_items([fan_item()])
+    source.update_all_items([fan_item()], "Fan")
 
     module_types = inventory.get_all_items(NBModuleType)
     assert len(module_types) == 1
@@ -308,7 +306,7 @@ def test_component_without_manufacturer_falls_back_to_unknown():
     placeholder so the required module type field is always populated."""
     source, inventory, _ = make_source(True, "4.3.0")  # device has no device type / manufacturer
 
-    source.update_all_items([fan_item()])
+    source.update_all_items([fan_item()], "Fan")
 
     module_types = inventory.get_all_items(NBModuleType)
     assert len(module_types) == 1
@@ -329,12 +327,11 @@ def test_existing_module_type_manufacturer_is_preserved():
 
     # the PCIe extender reports no manufacturer
     source.update_all_items([{
-        "inventory_type": "Storage Controller",
         "full_name": "PCIe Extender",
         "model": "PCIe Extender",
         "health": "OK",
         "description": ["LDs: 1, PDs: 1"],
-    }])
+    }], "Storage Controller")
 
     module_types = [mt for mt in inventory.get_all_items(NBModuleType)
                     if grab(mt, "data.model") == "PCIe Extender"]
@@ -708,7 +705,7 @@ def test_power_port_not_attached_to_module_when_feature_disabled():
 def test_inventory_item_backend_when_feature_disabled():
     source, inventory, device = make_source(False, "4.3.0")
 
-    source.update_all_items([cpu_item()])
+    source.update_all_items([cpu_item()], "CPU")
 
     # flag off -> the deprecated inventory item path is used, no modules created
     assert len(inventory.get_all_items(NBInventoryItem)) == 1
@@ -723,7 +720,7 @@ def test_inventory_item_backend_when_feature_disabled():
 def test_inventory_item_backend_on_old_netbox_even_with_flag():
     source, inventory, _ = make_source(True, "4.2.9")
 
-    source.update_all_items([cpu_item()])
+    source.update_all_items([cpu_item()], "CPU")
 
     # NetBox too old for modules -> inventory items regardless of the flag
     assert len(inventory.get_all_items(NBInventoryItem)) == 1
@@ -1111,7 +1108,9 @@ def test_add_update_interface_keeps_ip_when_no_ips_discovered():
 def _seed_existing_module_graph(source, inventory, device,
                                 bay_name="Socket 1",
                                 model="Intel Xeon Gold 6248R",
-                                serial="CPU-AAA"):
+                                serial="CPU-AAA",
+                                inventory_type="CPU",
+                                custom_fields=None):
     """
     Seed a module graph the way query_current_data() does: objects that already exist in
     NetBox are read into the inventory with read_from_netbox=True and therefore carry no
@@ -1132,7 +1131,8 @@ def _seed_existing_module_graph(source, inventory, device,
                                       "module_type": module_type,
                                       "status": "active",
                                       "serial": serial,
-                                      "custom_fields": {"inventory_type": "CPU"},
+                                      "custom_fields": {"inventory_type": inventory_type,
+                                                        **(custom_fields or {})},
                                   },
                                   read_from_netbox=True)
 
@@ -1156,7 +1156,7 @@ def test_existing_module_bay_is_marked_seen_by_the_source():
     source, inventory, device = make_source(True, "4.3.0")
     bay, module = _seed_existing_module_graph(source, inventory, device)
 
-    source.update_all_items([cpu_item()])
+    source.update_all_items([cpu_item()], "CPU")
 
     # the existing objects are reused, not duplicated
     assert len(inventory.get_all_items(NBModule)) == 1
@@ -1165,3 +1165,81 @@ def test_existing_module_bay_is_marked_seen_by_the_source():
     # the module is seen by the source, and so is the bay it is installed in
     assert module.source is source
     assert bay.source is source, "module bay was not marked as seen -> it gets orphan tagged"
+
+
+
+def _fan_inventory(reading, health="OK"):
+    """A check_redfish inventory dump holding a single fan, as update_fan() parses it."""
+
+    return {
+        "inventory": {
+            "fan": [
+                {
+                    "name": "Fan1",
+                    "id": "0.1",
+                    "operation_status": "Enabled",
+                    "health_status": health,
+                    "physical_context": "SystemBoard",
+                    "reading": reading,
+                    "reading_unit": "RPM",
+                }
+            ]
+        }
+    }
+
+
+def _seed_fan_module(source, inventory, device, health="OK", inventory_speed=None):
+    """Seed the fan module graph that update_fan() will match, as it exists in NetBox."""
+
+    return _seed_existing_module_graph(source, inventory, device,
+                                       bay_name="Fan1 (ID: 0.1)",
+                                       model="Fan1 (ID: 0.1)",
+                                       serial=None,
+                                       inventory_type="Fan",
+                                       custom_fields={"health": health,
+                                                      "inventory_speed": inventory_speed})
+
+
+def test_component_type_missing_from_scan_marks_modules_absent_instead_of_orphaning():
+    """
+    update_all_items() returned early on an empty batch, so when a scan reported no component of
+    a type at all, the existing modules were never marked Absent and never registered with the
+    source - tag_all_the_things() then orphan tagged them and their bays.
+    """
+
+    source, inventory, device = make_source(True, "4.3.0")
+    bay, module = _seed_fan_module(source, inventory, device)
+
+    # the scan reports no fans at all
+    source.inventory_file_content = {"inventory": {"fan": []}}
+    source.update_fan()
+
+    # the component is gone: say so, rather than letting the object be orphan tagged
+    assert grab(module, "data.custom_fields.health") == "Absent"
+    assert module.source is source
+    assert bay.source is source
+
+    # nothing is created for a component that is not there
+    assert len(inventory.get_all_items(NBModule)) == 1
+    assert len(inventory.get_all_items(NBModuleBay)) == 1
+
+
+def test_module_already_absent_is_still_marked_seen():
+    """
+    Marking a module absent was guarded by its current health, so a module already absent was
+    never touched again and therefore never registered with the source on later runs. It then
+    carried the orphaned tag permanently even though the source still manages it.
+    """
+
+    source, inventory, device = make_source(True, "4.3.0")
+    bay, module = _seed_fan_module(source, inventory, device, health="Absent")
+
+    source.inventory_file_content = {"inventory": {"fan": []}}
+    source.update_fan()
+
+    assert grab(module, "data.custom_fields.health") == "Absent"
+    assert module.source is source
+    assert bay.source is source
+
+    # already absent: nothing changed, so there is nothing to write
+    assert module.updated_items == []
