@@ -7,6 +7,7 @@
 #  For a copy, see file LICENSE.txt included in this
 #  repository or visit: <https://opensource.org/licenses/MIT>.
 
+import ast
 import sys
 import re
 
@@ -178,6 +179,42 @@ def get_string_or_none(text=None):
         return str(text).strip()
 
     return None
+
+
+def get_name_part_or_none(text=None):
+    """
+    Only return content of text if it can be part of a component name
+
+    A data structure is not a name, and neither is the text of one. check_redfish
+    declares some fields as str but assigns a structured Redfish object, so the value
+    arrives here already repr()ed and an isinstance check cannot see it.
+
+    Parameters
+    ----------
+    text: str
+        string to parse
+
+    Returns
+    -------
+    (str, None): content of text
+    """
+
+    value = get_string_or_none(text)
+
+    if value is None or value[:1] not in ("{", "["):
+        return value
+
+    # only a value which really parses as a structure is rejected, so a name which
+    # merely starts with a brace is kept
+    try:
+        parsed = ast.literal_eval(value)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return value
+
+    if isinstance(parsed, (dict, list, set, tuple)):
+        return None
+
+    return value
 
 
 def plural(length):

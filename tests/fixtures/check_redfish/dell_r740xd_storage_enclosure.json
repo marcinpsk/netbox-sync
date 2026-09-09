@@ -1,0 +1,31 @@
+{
+  "inventory": {
+    "storage_enclosure": [
+      {
+        "firmware": null,
+        "health_status": "OK",
+        "id": "RAID.Integrated.1-1:0:Enclosure.Internal.0-1:RAID.Integrated.1-1",
+        "location": "{'Oem': {'Dell': {'@odata.type': '#DellLocation.v1_2_0.DellLocation', 'PartLocation': {'ExtendedReference': 'Front'}}}, 'PartLocation': {'LocationType': 'Backplane', 'Reference': 'Front'}}",
+        "manufacturer": null,
+        "model": "BP14G+EXP 0:1",
+        "name": "BP14G+EXP 0:1",
+        "num_bays": null,
+        "operation_status": "Enabled",
+        "physical_drive_ids": [
+          "RAID.Integrated.1-1:0:Disk.Bay.0:Enclosure.Internal.0-1:RAID.Integrated.1-1:0000000000000000000000000000000000000001",
+          "RAID.Integrated.1-1:0:Disk.Bay.1:Enclosure.Internal.0-1:RAID.Integrated.1-1:0000000000000000000000000000000000000002",
+          "RAID.Integrated.1-1:0:Disk.Bay.12:Enclosure.Internal.0-1:RAID.Integrated.1-1:0000000000000000000000000000000000000003",
+          "RAID.Integrated.1-1:0:Disk.Bay.13:Enclosure.Internal.0-1:RAID.Integrated.1-1:0000000000000000000000000000000000000004"
+        ],
+        "serial": null,
+        "storage_controller_ids": [
+          "RAID.Integrated.1-1:0"
+        ],
+        "storage_port": null,
+        "system_ids": [
+          "System.Embedded.1"
+        ]
+      }
+    ]
+  }
+}
