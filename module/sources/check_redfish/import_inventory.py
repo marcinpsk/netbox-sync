@@ -481,23 +481,17 @@ class CheckRedfish(SourceBase):
             health_status = get_string_or_none(grab(fan, "health_status"))
             physical_context = get_string_or_none(grab(fan, "physical_context"))
             fan_id = get_string_or_none(grab(fan, "id"))
-            reading = get_string_or_none(grab(fan, "reading"))
-            reading_unit = get_string_or_none(grab(fan, "reading_unit"))
 
             description = list()
-            speed = None
             if physical_context is not None:
                 description.append(f"Context: {physical_context}")
 
-            if reading is not None and reading_unit is not None:
-                reading_unit = "%" if reading_unit.lower() == "percent" else reading_unit
-                speed = f"{reading}{reading_unit}"
-
+            # the reading is the fan's current RPM or duty, not a nameplate value like every
+            # other component's speed, so storing it rewrote the fan on nearly every sync
             items.append({
                 "description": description,
                 "full_name": f"{fan_name} (ID: {fan_id})",
-                "health": health_status,
-                "speed": speed
+                "health": health_status
             })
 
         self.update_all_items(items, "Fan")
