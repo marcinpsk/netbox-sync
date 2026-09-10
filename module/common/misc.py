@@ -7,6 +7,7 @@
 #  For a copy, see file LICENSE.txt included in this
 #  repository or visit: <https://opensource.org/licenses/MIT>.
 
+import ast
 import sys
 import re
 
@@ -159,11 +160,7 @@ def get_string_or_none(text=None):
     """
     Only return stripped content of text if text is not None and not empty
 
-    Structured values (dict/list/set/tuple) are not meaningful names and are rejected with None.
-    Blindly str()-ing them (e.g. a Dell `location` Oem blob) would inject the whole repr into a
-    component name, blow past NetBox's 64-char limit, get truncated on store and then never match
-    on the next sync - recreating the item every run. Scalars (incl. ints, which many callers rely
-    on) keep their str() behavior.
+    A structured value is not a name and returns None. Scalars, including ints, still stringify.
 
     Parameters
     ----------
@@ -182,6 +179,42 @@ def get_string_or_none(text=None):
         return str(text).strip()
 
     return None
+
+
+def get_name_part_or_none(text=None):
+    """
+    Only return content of text if it can be part of a component name
+
+    A data structure is not a name, and neither is the text of one. check_redfish
+    declares some fields as str but assigns a structured Redfish object, so the value
+    arrives here already repr()ed and an isinstance check cannot see it.
+
+    Parameters
+    ----------
+    text: str
+        string to parse
+
+    Returns
+    -------
+    (str, None): content of text
+    """
+
+    value = get_string_or_none(text)
+
+    if value is None or value[:1] not in ("{", "["):
+        return value
+
+    # only a value which really parses as a structure is rejected, so a name which
+    # merely starts with a brace is kept
+    try:
+        parsed = ast.literal_eval(value)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return value
+
+    if isinstance(parsed, (dict, list, set, tuple)):
+        return None
+
+    return value
 
 
 def plural(length):

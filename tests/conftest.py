@@ -1,18 +1,256 @@
-# -*- coding: utf-8 -*-
 """
-Local pytest bootstrap.
+Shared fixtures for the netbox-sync test suite.
 
-Kept self-contained in the tests/ directory on purpose so the upstream pyproject.toml /
-uv.lock stay untouched - the test harness (pytest dependency, ini options) is meant to be
-wired up on our fork, not in the upstream project. Running the tests only needs pytest, e.g.:
+The integration tests run the real source handlers against vcsim, the vCenter
+simulator from the govmomi project, loaded with inventories that were captured
+from real vCenters with ``govc object.save`` (see tests/fixtures/vcsim/README.md).
+The NetBox side is netbox-sync's own in-memory NetBoxInventory, so no NetBox
+instance is needed either.
 
-    uv run --native-tls --with pytest pytest tests/
+vcsim is looked up in ``$VCSIM_BIN`` and then on ``$PATH``. Tests that need it are
+skipped when it is not installed; unit tests are unaffected.
 """
-
 import os
-import sys
+import shutil
+import socket
+import ssl
+import subprocess
+import tarfile
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
-# make the project importable (the `module` package lives at the repo root)
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+import pytest
+
+from module.config.base import ConfigOptions
+from module.config.group import ConfigOptionGroup
+from module.config.option import ConfigOption
+from module.config.parser import ConfigParser
+from module.netbox.connection import NetBoxHandler
+from module.netbox.inventory import NetBoxInventory
+from module.netbox.object_classes import NBDevice, NBTag
+from module.sources import instantiate_sources
+from module.sources.check_redfish.config import CheckRedfishConfig
+from module.sources.check_redfish.import_inventory import CheckRedfish
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "vcsim"
+
+# every *.tar.gz in the fixture directory is a vcsim inventory; drop a new capture
+# there and the vcsim-backed tests pick it up
+VCSIM_DUMPS = sorted(p.name[: -len(".tar.gz")] for p in FIXTURE_DIR.glob("*.tar.gz"))
+
+# NetBox version the in-memory inventory pretends to be. 4.2 introduced MAC
+# address objects, which is the code path current NetBox releases use.
+NETBOX_API_VERSION = "4.3.0"
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _wait_for_port(host: str, port: int, process: subprocess.Popen, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+            raise RuntimeError(f"vcsim exited with code {process.returncode}: {stderr.strip()}")
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.2)
+    raise RuntimeError(f"vcsim did not start listening on {host}:{port} within {timeout}s")
+
+
+@pytest.fixture(scope="session")
+def vcsim_binary() -> str:
+    binary = os.environ.get("VCSIM_BIN") or shutil.which("vcsim")
+    if binary is None:
+        pytest.skip("vcsim not found; set VCSIM_BIN or install it from https://github.com/vmware/govmomi/releases")
+    return binary
+
+
+@pytest.fixture(scope="session", params=VCSIM_DUMPS, ids=VCSIM_DUMPS)
+def vcsim(request, vcsim_binary, tmp_path_factory):
+    """
+    A vcsim process serving one captured inventory. Session scoped, so each dump
+    is started once per test run; parametrized, so every vcsim-backed test runs
+    against every dump.
+    """
+    name = request.param
+    extract_dir = tmp_path_factory.mktemp("vcsim")
+    with tarfile.open(FIXTURE_DIR / f"{name}.tar.gz") as archive:
+        archive.extractall(extract_dir, filter="data")
+    # govc object.save writes into a directory named after the vCenter
+    load_dir = next(p for p in extract_dir.iterdir() if p.is_dir())
+
+    host, port = "127.0.0.1", _free_port()
+    process = subprocess.Popen(
+        [vcsim_binary, "-load", str(load_dir), "-l", f"{host}:{port}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_port(host, port, process)
+        # vcsim accepts any credentials
+        yield SimpleNamespace(name=name, host=host, port=port, username="user", password="pass")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+@pytest.fixture
+def inventory():
+    """
+    A fresh in-memory NetBoxInventory. The class is a singleton with class-level
+    state, so it is reset before and after each test.
+    """
+    def _reset():
+        inv = NetBoxInventory()
+        inv.base_structure = {}
+        inv.source_list = []
+        inv.init()
+        inv.netbox_api_version = NETBOX_API_VERSION
+        return inv
+
+    inv = _reset()
+    yield inv
+    _reset()
+
+
+@pytest.fixture
+def load_config(tmp_path):
+    """
+    Returns a function that feeds a config file text to netbox-sync's ConfigParser
+    singleton, replacing whatever a previous test loaded. The file name decides the
+    format, settings.ini by default.
+    """
+    def _load(text: str, filename: str = "settings.ini") -> ConfigParser:
+        config_file = tmp_path / filename
+        config_file.write_text(text)
+        parser = ConfigParser()
+        parser.file_list.clear()
+        parser.content.clear()
+        parser.config_errors.clear()
+        parser.config_warnings.clear()
+        parser.parsing_finished = False
+        parser.add_config_file(str(config_file))
+        parser.read_config()
+        return parser
+
+    return _load
+
+
+@pytest.fixture
+def vmware_settings(vcsim) -> str:
+    """settings.ini pointing the VMware source at the running vcsim."""
+    return f"""
+[netbox]
+api_token = not-used-by-these-tests
+host_fqdn = 127.0.0.1
+
+[source/{vcsim.name}]
+type = vmware
+host_fqdn = {vcsim.host}
+port = {vcsim.port}
+username = {vcsim.username}
+password = {vcsim.password}
+validate_tls_certs = False
+permitted_subnets = 0.0.0.0/0, ::/0
+dns_name_lookup = False
+vm_disk_and_ram_in_decimal = False
+"""
+
+
+@pytest.fixture
+def vmware_source(vcsim, inventory, load_config, vmware_settings):
+    """The instantiated VMware source handler for the running vcsim, not yet applied."""
+    load_config(vmware_settings)
+    sources = instantiate_sources()
+    assert len(sources) == 1 and sources[0].init_successful, "VMware source failed to initialise"
+    inventory.resolve_relations()
+    return sources[0]
+
+
+@pytest.fixture
+def vmware_sync(inventory, vmware_source):
+    """The inventory after one full VMware source run, plus the source that produced it."""
+    vmware_source.apply()
+    return SimpleNamespace(inventory=inventory, source=vmware_source)
+
+
+@pytest.fixture
+def sdk(vcsim):
+    """
+    A pyVmomi ServiceContent for the running vcsim, independent of netbox-sync, so
+    tests can compare what was synced with what the SDK reports.
+    """
+    from pyVim import connect
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    instance = connect.SmartConnect(
+        host=vcsim.host, port=vcsim.port, user=vcsim.username, pwd=vcsim.password, sslContext=context,
+    )
+    try:
+        yield instance.RetrieveContent()
+    finally:
+        connect.Disconnect(instance)
+
+
+@pytest.fixture
+def check_redfish_source(inventory):
+    """
+    Returns a function building a minimally initialized CheckRedfish source on the fresh
+    inventory, with a device to hang components off. The real add_necessary_base_objects()
+    runs, so the source tag and every custom field are registered as they are in production.
+
+    Settings start from the declared defaults of every CheckRedfishConfig option and are
+    overridden by keyword arguments, so a test states only what it cares about and an option
+    added to the config later reaches the tests with its real default.
+    """
+    def _make(**overrides: object) -> SimpleNamespace:
+        source = object.__new__(CheckRedfish)
+        source.inventory = inventory
+        source.name = "test"
+        source.source_tag = "Source: test"
+        source.settings = check_redfish_settings(**overrides)
+        # the per inventory file state __init__ would have set up
+        source.reset_inventory_state()
+
+        source.add_necessary_base_objects()
+        # the primary tag is normally registered by the NetBox handler, not by the source
+        inventory.add_update_object(NBTag, data={"name": NetBoxHandler.primary_tag})
+
+        device = inventory.add_object(NBDevice, data={"name": "server01"}, source=source)
+        source.device_object = device
+
+        return SimpleNamespace(source=source, inventory=inventory, device=device)
+
+    return _make
+
+
+def check_redfish_settings(**overrides) -> ConfigOptions:
+    """
+    The settings a parsed check_redfish config produces: every declared option at its default,
+    with the given overrides applied. ConfigOptions is what ConfigBase.parse() returns, so an
+    option this source does not declare reads as None here exactly as it does in production.
+    """
+    values = {}
+    for entry in CheckRedfishConfig().options:
+        declared = entry.options if isinstance(entry, ConfigOptionGroup) else [entry]
+        for option in declared:
+            if isinstance(option, ConfigOption) and option.removed is not True:
+                values[option.key] = option.default_value
+
+    unknown = set(overrides) - set(values)
+    assert not unknown, f"not declared by CheckRedfishConfig: {sorted(unknown)}"
+
+    values.update(overrides)
+    return ConfigOptions(**values)

@@ -1,61 +1,34 @@
-# -*- coding: utf-8 -*-
-"""
-Integration tests for modeling check_redfish hardware components as NetBox modules
-(the modern replacement for the deprecated inventory items).
+"""Modeling check_redfish hardware components as NetBox modules.
 
-These tests exercise the real NetBoxInventory and the real NetBoxObject classes through the
-actual CheckRedfish source methods - no mocks. The only boundary not exercised is the NetBox
-REST API itself (which requires a live NetBox instance, see the plan's verification section).
+Drives the real CheckRedfish methods against the real NetBoxInventory and NetBoxObject
+classes. Only the NetBox REST API itself is out of scope.
 """
-
-import logging
-import types
 
 import pytest
 
 from module.common.misc import grab
-from module.netbox.inventory import NetBoxInventory
 from module.netbox.object_classes import (
     NBDevice,
     NBDeviceType,
     NBInterface,
+    NBInventoryItem,
+    NBManufacturer,
     NBModule,
     NBModuleBay,
     NBModuleType,
-    NBInventoryItem,
-    NBManufacturer,
     NBPowerPort,
-    NBIPAddress,
 )
-from module.sources.check_redfish.import_inventory import CheckRedfish
 
 
-def make_source(model_components_as_modules: bool, netbox_api_version: str):
-    """
-    Build a minimally initialized CheckRedfish source backed by a fresh (reset) inventory.
-    The real add_necessary_base_objects() runs so custom fields are registered exactly as in
-    production (against dcim.module or dcim.inventoryitem depending on the chosen backend).
-    """
-
-    inventory = NetBoxInventory()
-    # reset the singleton state so each test starts from an empty inventory
-    inventory.init()
-    inventory.source_list = list()
-    inventory.netbox_api_version = netbox_api_version
-
-    source = object.__new__(CheckRedfish)
-    source.inventory = inventory
-    source.name = "test"
-    source.source_tag = "Source: test"
-    source.settings = types.SimpleNamespace(model_components_as_modules=model_components_as_modules)
-
-    # registers the source tag and all custom fields via the real code path
-    source.add_necessary_base_objects()
-
-    device = inventory.add_object(NBDevice, data={"name": "server01"}, source=source)
-    source.device_object = device
-
-    return source, inventory, device
+@pytest.fixture
+def modules_source(check_redfish_source):
+    """The shared check_redfish fixture, with the modules option and a NetBox version to test."""
+    def _make(model_components_as_modules: bool, netbox_api_version: str, **extra: object):
+        context = check_redfish_source(
+            model_components_as_modules=model_components_as_modules, **extra)
+        context.inventory.netbox_api_version = netbox_api_version
+        return context.source, context.inventory, context.device
+    return _make
 
 
 def cpu_item(bay_name="Socket 1",
@@ -91,13 +64,13 @@ def cpu_item(bay_name="Socket 1",
     (False, "4.3.0", False),  # feature disabled -> inventory items
     (False, "5.0.0", False),
 ])
-def test_use_modules_decision_matrix(flag, api_version, expected):
-    source, _, _ = make_source(flag, api_version)
+def test_use_modules_decision_matrix(modules_source, flag, api_version, expected):
+    source, _, _ = modules_source(flag, api_version)
     assert source.use_modules() is expected
 
 
-def test_creates_full_module_graph_for_cpu():
-    source, inventory, device = make_source(True, "4.3.0")
+def test_creates_full_module_graph_for_cpu(modules_source):
+    source, inventory, device = modules_source(True, "4.3.0")
 
     source.update_all_items([cpu_item()], "CPU")
 
@@ -140,8 +113,8 @@ def test_creates_full_module_graph_for_cpu():
     assert module.get_display_name(including_second_key=True) == "Socket 1 (server01)"
 
 
-def test_module_sync_is_idempotent():
-    source, inventory, _ = make_source(True, "4.3.0")
+def test_module_sync_is_idempotent(modules_source):
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     source.update_all_items([cpu_item()], "CPU")
     source.update_all_items([cpu_item()], "CPU")
@@ -152,8 +125,8 @@ def test_module_sync_is_idempotent():
     assert len(inventory.get_all_items(NBModuleType)) == 1
 
 
-def test_same_model_reuses_module_type_across_devices():
-    source, inventory, _ = make_source(True, "4.3.0")
+def test_same_model_reuses_module_type_across_devices(modules_source):
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     # first device gets a CPU
     source.update_all_items([cpu_item(serial="CPU-AAA")], "CPU")
@@ -170,9 +143,9 @@ def test_same_model_reuses_module_type_across_devices():
     assert len(inventory.get_all_items(NBManufacturer)) == 1
 
 
-def test_different_model_creates_distinct_module_type():
+def test_different_model_creates_distinct_module_type(modules_source):
     """This is the 'one server type, different CPUs' use case."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     source.update_all_items([cpu_item(model="Intel Xeon Gold 6248R", serial="CPU-AAA")], "CPU")
 
@@ -185,14 +158,14 @@ def test_different_model_creates_distinct_module_type():
     assert len(inventory.get_all_items(NBModule)) == 2
 
 
-def test_same_bay_new_model_updates_module_type():
+def test_same_bay_new_model_updates_module_type(modules_source):
     """Same device + same physical bay + a replaced CPU model across runs.
 
     Regression for CodeRabbit PR #1: the bay must be keyed on a stable slot (not the
     model-bearing display name), so a model swap reuses the same bay and the module
     re-points to the new module type instead of churning the bay or keeping a stale type.
     """
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     # first run: CPU model A installed in socket "Socket 1"
     source.update_all_items([cpu_item(bay_name="Socket 1",
@@ -216,8 +189,8 @@ def test_same_bay_new_model_updates_module_type():
     assert module.data["serial"] == "CPU-BBB"
 
 
-def test_missing_component_marks_module_health_absent():
-    source, inventory, _ = make_source(True, "4.3.0")
+def test_missing_component_marks_module_health_absent(modules_source):
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     cpu1 = cpu_item(bay_name="Socket 1", serial="CPU-AAA")
     cpu2 = cpu_item(bay_name="Socket 2", serial="CPU-BBB")
@@ -235,12 +208,12 @@ def test_missing_component_marks_module_health_absent():
     assert grab(modules_by_bay["Socket 2"], "data.custom_fields.health") == "Absent"
 
 
-def test_mixed_bay_transition_does_not_remap_modules():
+def test_mixed_bay_transition_does_not_remap_modules(modules_source):
     """One bay disappears while a different new bay appears in the same sync. Because the module
     bay is the authoritative physical slot (and update_module never moves a module between bays),
     the removed bay must go Absent and the new bay must get its own module - the new component
     must NOT be silently remapped onto the removed slot."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     source.update_all_items([
         cpu_item(bay_name="Socket 1", serial="CPU-AAA"),
@@ -278,11 +251,11 @@ def fan_item(bay_name="System Board Fan1 (ID: 0.56)", health="OK"):
     }
 
 
-def test_component_without_manufacturer_uses_device_manufacturer():
+def test_component_without_manufacturer_uses_device_manufacturer(modules_source):
     """NetBox requires a manufacturer on a module type. Components that report none (fans,
     storage enclosures, PCIe extenders) must still get one, otherwise the module-type POST
     fails with 'manufacturer required' and the whole module create cascade fails."""
-    source, inventory, device = make_source(True, "4.3.0")
+    source, inventory, device = modules_source(True, "4.3.0")
 
     # give the device a manufacturer via its device type, like a real synced device has
     manufacturer = inventory.add_object(NBManufacturer, data={"name": "Acme"}, source=source)
@@ -301,10 +274,10 @@ def test_component_without_manufacturer_uses_device_manufacturer():
     assert grab(module_types[0], "data.manufacturer.data.name") == device_manufacturer
 
 
-def test_component_without_manufacturer_falls_back_to_unknown():
+def test_component_without_manufacturer_falls_back_to_unknown(modules_source):
     """When neither the component nor the device exposes a manufacturer, fall back to a
     placeholder so the required module type field is always populated."""
-    source, inventory, _ = make_source(True, "4.3.0")  # device has no device type / manufacturer
+    source, inventory, _ = modules_source(True, "4.3.0")  # device has no device type / manufacturer
 
     source.update_all_items([fan_item()], "Fan")
 
@@ -314,11 +287,11 @@ def test_component_without_manufacturer_falls_back_to_unknown():
     assert len(inventory.get_all_items(NBModule)) == 1
 
 
-def test_existing_module_type_manufacturer_is_preserved():
+def test_existing_module_type_manufacturer_is_preserved(modules_source):
     """If a module type for this model already exists in NetBox with a manufacturer (set by a
     previous sync or curated by hand), a later sync of a component that reports no manufacturer
     must reuse it, not overwrite it with the device-vendor / 'Unknown' fallback."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     # a module type for this model already exists in NetBox, manufacturer "Globex"
     globex = inventory.add_object(NBManufacturer, data={"name": "Globex"}, source=source)
@@ -340,10 +313,10 @@ def test_existing_module_type_manufacturer_is_preserved():
     assert grab(module_types[0], "data.manufacturer.data.name") == "Globex"
 
 
-def test_nic_and_bmc_interfaces_are_attached_to_their_modules():
+def test_nic_and_bmc_interfaces_are_attached_to_their_modules(modules_source):
     """NIC port interfaces are attached to their adapter's module and the BMC interface to the
     manager module, so NetBox cascade-deletes them when the module is removed (module FK)."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.interface_adapter_type_dict = {}
     source.nic_module_bay_by_adapter_id = {}
     source.manager_name = None
@@ -390,10 +363,10 @@ def test_nic_and_bmc_interfaces_are_attached_to_their_modules():
     assert grab(nic_interface, "data.module") is source.find_device_module_by_bay_name("NIC.Slot.1")
 
 
-def test_nic_port_interface_named_by_stable_redfish_id():
+def test_nic_port_interface_named_by_stable_redfish_id(modules_source):
     """With modules on, a NIC port is named by its stable redfish id (e.g. NIC.Slot.1-1) rather
     than the long human label prepended to it; the descriptive label moves to the description."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.interface_adapter_type_dict = {}
     source.nic_module_bay_by_adapter_id = {}
     source.manager_name = None
@@ -429,11 +402,11 @@ def test_nic_port_interface_named_by_stable_redfish_id():
         "Integrated NIC 1 Port 1 Partition 1"
 
 
-def test_nic_module_bay_stable_when_adapter_label_changes():
+def test_nic_module_bay_stable_when_adapter_label_changes(modules_source):
     """The NIC module bay is keyed on the stable adapter id (e.g. NIC.Slot.1), not the mutable
     human label - so a relabeled adapter in the same physical slot reuses the bay instead of
     churning a new one (which strict bay matching would otherwise mark the old one Absent for)."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.interface_adapter_type_dict = {}
     source.nic_module_bay_by_adapter_id = {}
 
@@ -455,11 +428,11 @@ def test_nic_module_bay_stable_when_adapter_label_changes():
     assert source.nic_module_bay_by_adapter_id["NIC.Slot.1"] == "NIC.Slot.1"
 
 
-def test_dimm_module_bay_stable_when_dimm_type_changes():
+def test_dimm_module_bay_stable_when_dimm_type_changes(modules_source):
     """A DIMM's module bay is the stable slot (e.g. "DIMM A1"); the memory type appended to the
     display name must not be part of the bay identity, so swapping the DIMM reuses the bay and
     only re-points its module type instead of churning a new bay. Drives the real update_memory()."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     def dimm(dimm_type, part):
         return {"inventory": {"memory": [
@@ -480,11 +453,11 @@ def test_dimm_module_bay_stable_when_dimm_type_changes():
     assert grab(inventory.get_all_items(NBModule)[0], "data.module_type.data.model") == "PN-DDR5"
 
 
-def test_physical_drive_module_bay_stable_when_model_changes():
+def test_physical_drive_module_bay_stable_when_model_changes(modules_source):
     """A physical drive's module bay is the stable slot; the type/model appended to the display
     name must not churn the bay, so replacing the drive in a slot reuses the bay (a real swap also
     brings a new serial). Drives the real update_physical_drive()."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     def drive(model, serial):
         return {"inventory": {"physical_drive": [
@@ -504,9 +477,9 @@ def test_physical_drive_module_bay_stable_when_model_changes():
     assert grab(inventory.get_all_items(NBModule)[0], "data.serial") == "DRV-BBB"
 
 
-def test_interfaces_not_attached_to_modules_when_feature_disabled():
+def test_interfaces_not_attached_to_modules_when_feature_disabled(modules_source):
     """With the modules feature off, interfaces must not get a module reference."""
-    source, inventory, _ = make_source(False, "4.3.0")
+    source, inventory, _ = modules_source(False, "4.3.0")
     source.interface_adapter_type_dict = {}
     source.nic_module_bay_by_adapter_id = {}
     source.manager_name = None
@@ -552,10 +525,10 @@ def _psu_inventory():
     }
 
 
-def test_power_port_attached_to_its_power_supply_module():
+def test_power_port_attached_to_its_power_supply_module(modules_source):
     """A power supply is modeled as a module; its power port hangs off that module (module FK)
     so NetBox cascade-deletes the port when the PSU module is removed."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.settings.overwrite_power_supply_name = False
     source.settings.overwrite_power_supply_attributes = False
     source.inventory_file_content = _psu_inventory()
@@ -577,10 +550,10 @@ def test_power_port_attached_to_its_power_supply_module():
     assert grab(psu_module, "data.module_bay.data.name") == "PS1"
 
 
-def test_power_supply_bay_keyed_on_stable_slot_not_type():
+def test_power_supply_bay_keyed_on_stable_slot_not_type(modules_source):
     """The PSU module bay must be the stable physical slot (e.g. "PS1"), independent of the
     AC/DC type which is part of the supply, not the slot - so a later swap reuses the bay."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.settings.overwrite_power_supply_name = False
     source.settings.overwrite_power_supply_attributes = False
     source.inventory_file_content = _psu_inventory()  # name "PS1", type "AC"
@@ -593,10 +566,10 @@ def test_power_supply_bay_keyed_on_stable_slot_not_type():
     assert bays[0].data["name"] == "PS1"
 
 
-def test_power_supply_swap_reuses_bay_and_repoints_module_type():
+def test_power_supply_swap_reuses_bay_and_repoints_module_type(modules_source):
     """Swapping the supply in a slot (AC -> DC, different model) reuses the same module bay and
     re-points the module type, instead of churning a new bay - exactly like a CPU socket swap."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.settings.overwrite_power_supply_name = False
     source.settings.overwrite_power_supply_attributes = False
 
@@ -623,11 +596,11 @@ def test_power_supply_swap_reuses_bay_and_repoints_module_type():
     assert grab(inventory.get_all_items(NBPowerPort)[0], "data.module") is modules[0]
 
 
-def test_power_port_module_link_detached_when_feature_disabled_after_enable():
+def test_power_port_module_link_detached_when_feature_disabled_after_enable(modules_source):
     """An enable -> disable transition must clear the previously persisted power-port module link.
     unset_attribute marks the field for a real None PATCH (update() alone silently skips None), so
     ownership is not left stale and a later module prune can't cascade-delete a port we manage."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.settings.overwrite_power_supply_name = False
     source.settings.overwrite_power_supply_attributes = False
 
@@ -643,11 +616,11 @@ def test_power_port_module_link_detached_when_feature_disabled_after_enable():
     assert "module" in power_port.unset_items
 
 
-def test_interface_module_link_detached_when_feature_disabled_after_enable():
+def test_interface_module_link_detached_when_feature_disabled_after_enable(modules_source):
     """Same enable -> disable detach guarantee for interfaces. Uses the BMC/management interface
     because its name is stable across the modules and inventory-item paths, so it is matched by
     name on the second run (a regular NIC port is renamed and would not match)."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
     source.interface_adapter_type_dict = {}
     source.nic_module_bay_by_adapter_id = {}
     source.manager_name = None
@@ -684,10 +657,10 @@ def test_interface_module_link_detached_when_feature_disabled_after_enable():
     assert "module" in interface.unset_items
 
 
-def test_power_port_not_attached_to_module_when_feature_disabled():
+def test_power_port_not_attached_to_module_when_feature_disabled(modules_source):
     """With the modules feature off, the PSU stays a deprecated inventory item and its power port
     must not get a module reference."""
-    source, inventory, _ = make_source(False, "4.3.0")
+    source, inventory, _ = modules_source(False, "4.3.0")
     source.settings.overwrite_power_supply_name = False
     source.settings.overwrite_power_supply_attributes = False
     source.inventory_file_content = _psu_inventory()
@@ -702,8 +675,8 @@ def test_power_port_not_attached_to_module_when_feature_disabled():
     assert len(inventory.get_all_items(NBInventoryItem)) == 1
 
 
-def test_inventory_item_backend_when_feature_disabled():
-    source, inventory, device = make_source(False, "4.3.0")
+def test_inventory_item_backend_when_feature_disabled(modules_source):
+    source, inventory, device = modules_source(False, "4.3.0")
 
     source.update_all_items([cpu_item()], "CPU")
 
@@ -717,8 +690,8 @@ def test_inventory_item_backend_when_feature_disabled():
     assert grab(item, "data.custom_fields.inventory_type") == "CPU"
 
 
-def test_inventory_item_backend_on_old_netbox_even_with_flag():
-    source, inventory, _ = make_source(True, "4.2.9")
+def test_inventory_item_backend_on_old_netbox_even_with_flag(modules_source):
+    source, inventory, _ = modules_source(True, "4.2.9")
 
     source.update_all_items([cpu_item()], "CPU")
 
@@ -747,31 +720,12 @@ def _enclosure(location):
          "operation_status": "Enabled"}]}}
 
 
-def test_get_string_or_none_rejects_structured_values():
-    """The shared parser must not stringify a nested dict/list into a name. Scalars (incl. ints,
-    which many callers rely on) keep their existing str() behavior."""
-    from module.common.misc import get_string_or_none
-
-    # structured values are not meaningful names -> None, not "{'Oem': ...}"
-    assert get_string_or_none(_DELL_LOCATION) is None
-    assert get_string_or_none(["a", "b"]) is None
-    assert get_string_or_none(("a",)) is None
-    assert get_string_or_none({1, 2}) is None
-
-    # scalars are unchanged
-    assert get_string_or_none("  Slot 5 ") == "Slot 5"
-    assert get_string_or_none(5) == "5"      # ints still stringify (cores/slot/num_ports/...)
-    assert get_string_or_none(0) == "0"
-    assert get_string_or_none(None) is None
-    assert get_string_or_none("") is None
-
-
-def test_storage_enclosure_dell_location_dict_does_not_churn_module_bay():
+def test_storage_enclosure_dell_location_dict_does_not_churn_module_bay(modules_source):
     """A Dell structured `location` must not be stringified into the bay/module name: it would blow
     past NetBox's 64-char limit, get truncated on store, then never match the (untruncated) name
     computed on the next sync -> the bay+module is recreated every run. Modules backend uses strict
     bay matching, so this churn is direct. Drives the real update_storage_enclosure() twice."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     source.inventory_file_content = _enclosure(_DELL_LOCATION)
     source.update_storage_enclosure()
@@ -790,32 +744,13 @@ def test_storage_enclosure_dell_location_dict_does_not_churn_module_bay():
     assert name == "BP_PSV 0:1"
 
 
-def test_storage_enclosure_dell_location_dict_not_duplicated_as_inventory_item():
-    """Same root cause on the deprecated inventory-item backend: the >64-char stringified-dict name
-    is truncated on store and re-added on the next sync. Drives the real update_storage_enclosure()
-    twice with the modules feature off."""
-    source, inventory, _ = make_source(False, "4.3.0")
-
-    source.inventory_file_content = _enclosure(_DELL_LOCATION)
-    source.update_storage_enclosure()
-    source.update_storage_enclosure()
-
-    items = inventory.get_all_items(NBInventoryItem)
-    assert len(items) == 1
-    name = items[0].data["name"]
-    assert "Oem" not in name
-    assert "Dell" not in name
-    assert "{" not in name
-    assert len(name) <= 64
-
-
-def test_long_module_bay_name_does_not_churn():
+def test_long_module_bay_name_does_not_churn(modules_source):
     """A module bay name longer than NetBox's 64-char limit is truncated on store, so the match key
     must be truncated the same way - otherwise the bay + module is recreated every sync (the module
     path uses strict matching with no alphabetical fallback, unlike inventory items). Reproduces the
     prod churn from a physical drive whose slot/location string exceeds 64 chars (e.g. device 5's
     'Solid State Disk 0:1:0 RAID.SL.3-1:0:Disk.Bay.0:...'). Drives the real update_physical_drive()."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     def drive():
         return {"inventory": {"physical_drive": [
@@ -836,12 +771,12 @@ def test_long_module_bay_name_does_not_churn():
     assert len(bays[0].data["name"]) <= 64
 
 
-def test_long_module_bay_names_sharing_a_prefix_do_not_collide():
+def test_long_module_bay_names_sharing_a_prefix_do_not_collide(modules_source):
     """Two physically distinct drives whose slot strings are identical for the first 64 chars but
     differ afterwards must remain two separate module bays. A plain name[:64] truncation collapses
     them to the same match key, silently merging two slots into one (update_all_modules matches by
     module_bay_name, create_module stores it as the bay name). Drives the real update_physical_drive()."""
-    source, inventory, _ = make_source(True, "4.3.0")
+    source, inventory, _ = modules_source(True, "4.3.0")
 
     # a common location prefix long enough that the disambiguating suffix lands beyond char 64
     common = "RAID.SL.3-1:0:Enclosure.Internal.0-1:Backplane.Slot.Group.A."
@@ -864,245 +799,6 @@ def test_long_module_bay_names_sharing_a_prefix_do_not_collide():
     assert len(set(names)) == 2, names
     assert len(inventory.get_all_items(NBModule)) == 2
     assert all(len(n) <= 64 for n in names), names
-
-
-def _dell_system(system_serial="CNEXAMPLE00001", service_tag="ABC1234", with_chassis=True):
-    """A Dell system as check_redfish reports it: `system.serial` is the board PPID, while the
-    Service Tag (what dmidecode / OS tooling report) is exposed as `chassis.sku`."""
-    content = {"inventory": {"system": [
-        {"id": "1", "name": "System", "manufacturer": "Dell Inc.", "model": "PowerEdge R650",
-         "serial": system_serial, "host_name": "server01",
-         "health_status": "OK", "power_state": "On"}]}}
-    if with_chassis:
-        content["inventory"]["chassis"] = [{"id": "1", "sku": service_tag}]
-    return content
-
-
-def _run_update_device(source, content, dell_serial_from_service_tag):
-    source.settings.overwrite_host_name = False
-    source.settings.dell_serial_from_service_tag = dell_serial_from_service_tag
-    source.inventory_file_content = content
-    source.update_device()
-    return source.device_object
-
-
-def test_dell_serial_defaults_to_system_serial():
-    """Default (option off): the device serial is the check_redfish system serial and the Dell
-    Service Tag stays in its own custom field. Existing behavior - must not change."""
-    source, _, _ = make_source(False, "4.3.0")
-    device = _run_update_device(source, _dell_system(), dell_serial_from_service_tag=False)
-
-    assert device.data["serial"] == "CNEXAMPLE00001"
-    assert grab(device, "data.custom_fields.service_tag") == "ABC1234"
-    assert grab(device, "data.custom_fields.system_serial") is None
-
-
-def test_dell_serial_from_service_tag_option_swaps_serial_into_custom_field():
-    """Opt-in option on: the Dell Service Tag (what dmidecode/OS report) becomes the device serial
-    and the original system serial (the Dell PPID) moves to the 'system_serial' custom field."""
-    source, _, _ = make_source(False, "4.3.0")
-    device = _run_update_device(source, _dell_system(), dell_serial_from_service_tag=True)
-
-    assert device.data["serial"] == "ABC1234"
-    assert grab(device, "data.custom_fields.system_serial") == "CNEXAMPLE00001"
-    # the Service Tag is still exposed as its own custom field
-    assert grab(device, "data.custom_fields.service_tag") == "ABC1234"
-
-
-def test_dell_serial_from_service_tag_falls_back_when_no_service_tag():
-    """Option on but no Service Tag available -> serial stays the system serial (no data loss),
-    and no system_serial custom field is written."""
-    source, _, _ = make_source(False, "4.3.0")
-    device = _run_update_device(source, _dell_system(with_chassis=False),
-                                dell_serial_from_service_tag=True)
-
-    assert device.data["serial"] == "CNEXAMPLE00001"
-    assert grab(device, "data.custom_fields.system_serial") is None
-
-
-def _match_content(system_serial="CNEXAMPLE00001", service_tag="ABC1234"):
-    """Inventory file (no meta.inventory_id, so device matching falls back to the serial)."""
-    return {"inventory": {
-        "system": [{"manufacturer": "Dell Inc.", "serial": system_serial}],
-        "chassis": [{"sku": service_tag}],
-    }}
-
-
-def test_apply_matches_device_by_system_serial_when_option_disabled():
-    """Default fallback matching (option off): a device is matched by the system serial. Drives the
-    real find_device_object() against real NBDevice lookups. Regression guard - must not change."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = False
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
-
-    source.inventory_file_content = _match_content()
-
-    assert source.find_device_object("dell-host.json") is True
-    assert source.device_object is existing
-
-
-def test_apply_matches_not_yet_migrated_device_by_system_serial_with_option_on():
-    """Option on but the device's persisted serial is still the system serial (not yet migrated):
-    the system-serial fallback must still find it."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = True
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
-
-    source.inventory_file_content = _match_content()
-
-    assert source.find_device_object("dell-host.json") is True
-    assert source.device_object is existing
-
-
-def test_apply_matches_dell_device_by_service_tag_when_serial_swapped():
-    """With dell_serial_from_service_tag on, a device whose persisted serial is the Service Tag must
-    still be found by the fallback (when meta.inventory_id is unavailable). Without this the device
-    is silently skipped and stops being updated. Drives the real find_device_object()."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = True
-    # a device previously synced with the option on: its NetBox serial is the Service Tag
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "ABC1234"}, source=source)
-
-    # same box: system serial is the PPID, Service Tag is the chassis SKU, no meta.inventory_id
-    source.inventory_file_content = _match_content()
-
-    assert source.find_device_object("dell-host.json") is True
-    assert source.device_object is existing
-
-
-def test_dell_system_serial_custom_field_not_overwritten_with_none():
-    """A transient missing system serial (chassis SKU still present) must not overwrite an existing
-    system_serial custom field with None. Drives the real update_device() twice."""
-    source, _, _ = make_source(False, "4.3.0")
-    device = _run_update_device(source, _dell_system(), dell_serial_from_service_tag=True)
-    assert grab(device, "data.custom_fields.system_serial") == "CNEXAMPLE00001"
-
-    # second sync: system.serial transiently missing, Service Tag still present
-    _run_update_device(source, _dell_system(system_serial=None), dell_serial_from_service_tag=True)
-
-    assert grab(device, "data.custom_fields.system_serial") == "CNEXAMPLE00001"
-
-
-def test_dell_blank_service_tag_falls_through_to_warning():
-    """A blank/whitespace-only chassis SKU is not a valid Service Tag: no service_tag custom field
-    is written and the serial stays the system serial (covers the get_string_or_none hardening)."""
-    source, _, _ = make_source(False, "4.3.0")
-    device = _run_update_device(source, _dell_system(service_tag="   "),
-                                dell_serial_from_service_tag=True)
-
-    assert grab(device, "data.custom_fields.service_tag") is None
-    assert device.data["serial"] == "CNEXAMPLE00001"
-    assert grab(device, "data.custom_fields.system_serial") is None
-
-
-def test_apply_matches_device_when_system_serial_has_padding():
-    """update_device() stores the serial stripped (get_string_or_none), so the fallback lookup must
-    normalize the Redfish serial too - otherwise a padded serial won't match the stored device."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = False
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
-
-    # Redfish reports the same serial with surrounding whitespace
-    source.inventory_file_content = _match_content(system_serial="  CNEXAMPLE00001  ")
-
-    assert source.find_device_object("dell-host.json") is True
-    assert source.device_object is existing
-
-
-def test_apply_matches_device_by_service_tag_when_system_serial_missing():
-    """Option on and no system serial in the inventory: matching must resolve by Service Tag and
-    must NOT probe serial=None first (which would wrongly match a serial-less device)."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = True
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "ABC1234"}, source=source)
-
-    source.inventory_file_content = _match_content(system_serial=None)
-
-    assert source.find_device_object("dell-host.json") is True
-    assert source.device_object is existing
-
-
-def test_apply_matches_service_tag_device_even_when_option_disabled():
-    """A device persisted with the Service Tag as its serial (from a prior run with the option on)
-    must still match after the option is later disabled - otherwise it is stranded and silently
-    dropped every sync. Service Tag matching must not depend on the current option value."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = False   # option now OFF
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "ABC1234"}, source=source)  # serial == Service Tag
-
-    # inventory file: system serial is the PPID, Service Tag is the chassis SKU, no meta.inventory_id
-    source.inventory_file_content = _match_content()
-
-    assert source.find_device_object("dell-host.json") is True
-    assert source.device_object is existing
-
-
-def test_absent_inventory_id_does_not_warn_and_still_matches_by_serial(caplog):
-    """meta.inventory_id is optional - devices are commonly matched by serial / Service Tag instead
-    (server-lifecycle omits it). An absent id must NOT emit the 'must be an integer' warning, and the
-    match must still fall through to the serial. Drives the real find_device_object() + real logger."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = False
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
-
-    source.inventory_file_content = _match_content()   # no meta.inventory_id
-
-    with caplog.at_level(logging.WARNING, logger="NetBox-Sync"):
-        assert source.find_device_object("dell-host.json") is True
-
-    assert source.device_object is existing
-    assert not [r.message for r in caplog.records if "meta.inventory_id" in r.message], \
-        [r.message for r in caplog.records]
-
-
-def test_invalid_inventory_id_warns_but_still_matches_by_serial(caplog):
-    """A genuinely invalid (non-integer) meta.inventory_id must still warn, but must not short-circuit
-    the serial fallback: the device is resolved by its serial regardless of the bad id."""
-    source, inventory, _ = make_source(False, "4.3.0")
-    source.settings.dell_serial_from_service_tag = False
-    existing = inventory.add_object(
-        NBDevice, data={"name": "dell-host", "serial": "CNEXAMPLE00001"}, source=source)
-
-    content = _match_content()
-    content["meta"] = {"inventory_id": "not-an-int"}
-    source.inventory_file_content = content
-
-    with caplog.at_level(logging.WARNING, logger="NetBox-Sync"):
-        assert source.find_device_object("dell-host.json") is True
-
-    assert source.device_object is existing
-    assert [r.message for r in caplog.records if "meta.inventory_id" in r.message]
-
-
-def test_add_update_interface_keeps_ip_when_no_ips_discovered():
-    """netbox-sync must not strip an existing IP from an interface when it discovered no IPs for it.
-    Redfish only reports the BMC IP, so an OS bond/bridge (e.g. pnet0) holding the management IP -
-    matched only by a shared MAC - would otherwise lose it, clearing the device primary IP. Drives
-    the real add_update_interface() removal loop against real NBInterface/NBIPAddress objects."""
-    source, inventory, device = make_source(True, "4.3.0")
-    source.settings.ip_tenant_inheritance_order = []
-    source.settings.permitted_subnets = None
-
-    iface = inventory.add_object(NBInterface, data={"name": "pnet0", "device": device}, source=source)
-    ip = inventory.add_object(
-        NBIPAddress, data={"address": "172.10.10.12/24", "assigned_object_id": iface}, source=source)
-    assert ip in iface.get_ip_addresses()
-
-    # rediscovering the interface with NO IPs must keep the existing management IP: the removal is
-    # skipped, so the IP is not queued for de-assignment (unset_attribute queues via unset_items)
-    source.add_update_interface(iface, device, {"name": "pnet0"}, [], keep_undiscovered_ips=True)
-    assert "assigned_object_id" not in ip.unset_items
-
-    # default behavior (used by other sources) still strips an IP that is no longer reported
-    source.add_update_interface(iface, device, {"name": "pnet0"}, [])
-    assert "assigned_object_id" in ip.unset_items
 
 
 def _seed_existing_module_graph(source, inventory, device,
@@ -1142,7 +838,7 @@ def _seed_existing_module_graph(source, inventory, device,
     return bay, module
 
 
-def test_existing_module_bay_is_marked_seen_by_the_source():
+def test_existing_module_bay_is_marked_seen_by_the_source(modules_source):
     """
     A component whose module already exists must still mark its module bay as seen.
 
@@ -1153,7 +849,7 @@ def test_existing_module_bay_is_marked_seen_by_the_source():
     installed in them stayed healthy.
     """
 
-    source, inventory, device = make_source(True, "4.3.0")
+    source, inventory, device = modules_source(True, "4.3.0")
     bay, module = _seed_existing_module_graph(source, inventory, device)
 
     source.update_all_items([cpu_item()], "CPU")
@@ -1200,43 +896,14 @@ def _seed_fan_module(source, inventory, device, health="OK", inventory_speed=Non
                                                       "inventory_speed": inventory_speed})
 
 
-def test_live_fan_reading_is_not_stored_and_does_not_churn():
-    """
-    A fan reading changes on every scan. Storing it on the module rewrote every fan module on
-    every run: 314 of 314 module updates over two days were inventory_speed going from one RPM
-    value to another. Readings are telemetry and belong in monitoring, not in the inventory.
-    """
-
-    source, inventory, device = make_source(True, "4.3.0")
-    bay, module = _seed_fan_module(source, inventory, device, inventory_speed="5700RPM")
-
-    # first run clears the reading stored by earlier versions
-    source.inventory_file_content = _fan_inventory("5700")
-    source.update_fan()
-
-    assert grab(module, "data.custom_fields.inventory_speed") is None
-
-    # from here on a changed reading must not produce another write
-    module.updated_items = list()
-    source.inventory_file_content = _fan_inventory("5670")
-    source.update_fan()
-
-    assert module.updated_items == [], "a changed fan reading still rewrites the module"
-
-    # the component itself is still tracked
-    assert grab(module, "data.custom_fields.health") == "OK"
-    assert module.source is source
-    assert bay.source is source
-
-
-def test_component_type_missing_from_scan_marks_modules_absent_instead_of_orphaning():
+def test_component_type_missing_from_scan_marks_modules_absent_instead_of_orphaning(modules_source):
     """
     update_all_items() returned early on an empty batch, so when a scan reported no component of
     a type at all, the existing modules were never marked Absent and never registered with the
     source - tag_all_the_things() then orphan tagged them and their bays.
     """
 
-    source, inventory, device = make_source(True, "4.3.0")
+    source, inventory, device = modules_source(True, "4.3.0")
     bay, module = _seed_fan_module(source, inventory, device)
 
     # the scan reports no fans at all
@@ -1253,14 +920,14 @@ def test_component_type_missing_from_scan_marks_modules_absent_instead_of_orphan
     assert len(inventory.get_all_items(NBModuleBay)) == 1
 
 
-def test_module_already_absent_is_still_marked_seen():
+def test_module_already_absent_is_still_marked_seen(modules_source):
     """
     Marking a module absent was guarded by its current health, so a module already absent was
     never touched again and therefore never registered with the source on later runs. It then
     carried the orphaned tag permanently even though the source still manages it.
     """
 
-    source, inventory, device = make_source(True, "4.3.0")
+    source, inventory, device = modules_source(True, "4.3.0")
     bay, module = _seed_fan_module(source, inventory, device, health="Absent")
 
     source.inventory_file_content = {"inventory": {"fan": []}}

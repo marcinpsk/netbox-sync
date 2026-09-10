@@ -1,21 +1,7 @@
-"""
-Tests that paginated NetBox list requests return every row exactly once.
+"""Paginated list requests must return every row exactly once.
 
-NetBox paginates with limit/offset. Several models order by a non-unique key
-(dcim.modulebay is ordered by (device, name), and duplicate bay names on one
-device are possible because the uniqueness constraint covers (device, module,
-name) and top-level bays have a NULL module). Rows tied on the sort key have no
-stable position between two queries, so a plain limit/offset walk can return one
-tied row twice and never return another.
-
-A row that is never returned is absent from the local inventory, so the sync
-believes the object does not exist and creates a second one. That is how 116
-duplicate module bays accumulated, which in turn made the modules in them flip
-between orphaned and not on every run.
-
-The real request() pagination loop is exercised against a real HTTP server that
-reproduces the tie instability, so the test covers the actual wiring rather than
-a description of it.
+Drives the real request() pagination loop against an HTTP server whose row order is
+unstable for rows tied on the sort key.
 """
 
 import json
@@ -28,10 +14,9 @@ import pytest
 import requests
 
 from module.netbox.connection import NetBoxHandler
-from module.netbox.object_classes import NBModuleBay
+from module.netbox.object_classes import NBIPAddress
 
-# 12 rows over 5-row pages, every row tied on the same sort key, so the server is
-# free to order them differently on each page request - exactly what Postgres does.
+# 12 rows over 5-row pages, all tied on the sort key
 TOTAL_ROWS = 12
 PAGE_SIZE = 5
 
@@ -53,8 +38,7 @@ class _UnstableNetBoxHandler(BaseHTTPRequestHandler):
             # a unique tiebreak makes the order total, so paging is stable
             rows.sort(key=lambda r: r["id"])
         else:
-            # tied rows: rotate them, standing in for the arbitrary order a
-            # database may return when the ORDER BY does not disambiguate
+            # rotate the tied rows, standing in for an arbitrary database order
             self.server.rotation += 1
             shift = self.server.rotation % len(rows)
             rows = rows[shift:] + rows[:shift]
@@ -81,8 +65,8 @@ class _UnstableNetBoxHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def netbox_api():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _UnstableNetBoxHandler)
-    server.rows = [{"id": i, "name": "DIMM A4", "device": {"id": 7, "name": "pve-3"}}
-                   for i in range(1, TOTAL_ROWS + 1)]
+    # NetBox permits the same address more than once, so its ordering cannot disambiguate
+    server.rows = [{"id": i, "address": "192.0.2.10/24"} for i in range(1, TOTAL_ROWS + 1)]
     server.rotation = 0
     server.requested_orderings = []
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -108,7 +92,7 @@ def handler(netbox_api):
 
 def test_every_row_is_returned_exactly_once(handler):
     """The regression: tied rows must not be dropped while walking the pages."""
-    result = handler.request(NBModuleBay)
+    result = handler.request(NBIPAddress)
 
     returned = [row["id"] for row in result["results"]]
 
@@ -118,7 +102,7 @@ def test_every_row_is_returned_exactly_once(handler):
 
 def test_list_requests_ask_for_a_unique_ordering(handler, netbox_api):
     """Without a unique tiebreak the server is free to reorder tied rows."""
-    handler.request(NBModuleBay)
+    handler.request(NBIPAddress)
 
     assert netbox_api.requested_orderings, "no GET was issued"
     assert netbox_api.requested_orderings[0] == "id"
@@ -126,14 +110,15 @@ def test_list_requests_ask_for_a_unique_ordering(handler, netbox_api):
 
 def test_ordering_is_kept_across_every_page(handler, netbox_api):
     """A tiebreak on page one only is still unstable on the pages after it."""
-    handler.request(NBModuleBay)
+    handler.request(NBIPAddress)
 
     assert len(netbox_api.requested_orderings) > 1, "expected a paginated response"
     assert set(netbox_api.requested_orderings) == {"id"}
 
 
 def test_caller_supplied_ordering_is_not_overridden(handler, netbox_api):
-    """A source asking for a specific order keeps it."""
-    handler.request(NBModuleBay, params={"ordering": "name"})
+    """A source asking for a specific order keeps it, on every page."""
+    handler.request(NBIPAddress, params={"ordering": "name"})
 
-    assert netbox_api.requested_orderings[0] == "name"
+    assert len(netbox_api.requested_orderings) > 1, "expected a paginated response"
+    assert set(netbox_api.requested_orderings) == {"name"}

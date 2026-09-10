@@ -62,6 +62,8 @@ class VMWareHandler(SourceBase):
         NBDeviceRole,
         NBSite,
         NBSiteGroup,
+        NBLocation,
+        NBRegion,
         NBCluster,
         NBDevice,
         NBVM,
@@ -87,6 +89,11 @@ class VMWareHandler(SourceBase):
     tag_session = None
 
     site_name = None
+
+    # values a BIOS reports when the vendor left the SMBIOS fields unset, plus the dummy vendor/model
+    # used for hosts where nothing better is known. None of these identify real hardware.
+    unknown_hardware_identifiers = ["Default string", "NA", "N/A", "None", "Null", "oem", "o.e.m",
+                                    "to be filled by o.e.m.", "Unknown", "Generic Vendor", "Generic Model"]
 
     def __init__(self, name=None):
 
@@ -445,6 +452,27 @@ class VMWareHandler(SourceBase):
 
         return True
 
+    @staticmethod
+    def hardware_identifier_is_unknown(value):
+        """
+        checks if a hardware identifier (vendor, model, asset tag) reported for a host
+        is a placeholder rather than a real value.
+
+        Parameters
+        ----------
+        value: str
+            identifier to check
+
+        Returns
+        -------
+        bool: True if value is unset or one of the known placeholders, otherwise False
+        """
+
+        if value is None:
+            return True
+
+        return value.lower() in [x.lower() for x in VMWareHandler.unknown_hardware_identifiers]
+
     def get_site_name(self, object_type, object_name, cluster_name=""):
         """
         Return a site name for a NBCluster or NBDevice depending on config options
@@ -474,13 +502,20 @@ class VMWareHandler(SourceBase):
 
         site_name = self.get_object_relation(object_name, relation_name)
 
-        if object_type == NBDevice and site_name is None:
+        # check if cluster is in a different site than the host and override the site name if so
+        if object_type == NBDevice:
             site_name = self.get_site_name(NBCluster, cluster_name)
             if site_name is not None:
-                log.debug2(f"Found a matching cluster site for {object_name}, using site '{site_name}'")
+                log.debug2(f"Found a matching cluster site for {object_name}, using site '{site_name}'. Overriding host site relation '{relation_name}'")
+            else:
+                site_name = self.get_object_relation(object_name, relation_name)
+                # set deault site name if no relation was found
+                if site_name is None:
+                    site_name = self.site_name
+                    log.debug2(f"No site relation for {type(object_name)}: '{object_name}' found, using default site '{site_name}'")
 
-        # set default site name
-        if site_name is None:
+        # set default site name for devices
+        if site_name is None and object_type == NBDevice:
             site_name = self.site_name
             log.debug(f"No site relation for '{object_name}' found, using default site '{site_name}'")
 
@@ -489,7 +524,94 @@ class VMWareHandler(SourceBase):
             site_name = None
             log.debug2(f"Site relation for '{object_name}' set to None")
 
+        log.debug2(f"Returning site name '{site_name}' for {object_type.name} '{object_name}'.")
+
         return site_name
+
+    def get_scope_type(self, object_type, object_name):
+        """
+        Retrieve the scope_type for a NBCluster instance by object name or from the config option
+        cluster_scope_type_relation
+
+        Note: Only NBCluster is supported as the object_type.
+
+        Parameters
+        ----------
+        object_type: object type
+            The NetBox object type (must be NBCluster).
+        object_name: str
+            The name of the object to look up.
+
+        Returns
+        -------
+        str or None: scope type if one is found, otherwise None
+        """
+
+        # Validate object type
+        if object_type != NBCluster:
+            raise ValueError(f"Object type must be '{NBCluster.name}'.")
+
+        # get scope type from relation config
+        relation_name = "cluster_scope_type_relation"
+        scope_type = self.get_object_relation(object_name, relation_name)
+        log.debug(f"Retrieved scope type '{scope_type}' for {object_type.name} '{object_name}' from relation '{relation_name}'.")
+
+        # if the scope_type is a list, use the first element
+        if scope_type is not None and type(scope_type) is list:
+            scope_type_list = scope_type
+            scope_type = scope_type_list[0] if len(scope_type_list) > 0 else None
+            log.debug(f"Scope type for {object_type.name} '{object_name}' is a list, using first element: '{scope_type}'")
+
+        # if scope_type is not a str, return None
+        if type(scope_type) is not str:
+            log.debug(f"scope_type is type: {type(scope_type)}, not str")
+            return None
+
+        # set scope_type to None if it is configured as "<NONE>"
+        if scope_type == "<NONE>":
+            log.debug(f"Scope type for {object_type.name} '{object_name}' is set to None")
+            return None
+
+        log.debug2(f"Returning scope type '{scope_type}' for {object_type.name} '{object_name}'.")
+        return scope_type
+
+    def get_scope_id(self, object_type, object_name):
+        """
+        Retrieve the scope_id for a NBCluster instance by object name or from the config option
+        cluster_scope_id_relation
+
+        Note: Only NBCluster is supported as the object_type.
+
+        Parameters
+        ----------
+        object_type: type
+            The NetBox object type (must be NBCluster).
+        object_name: str
+            The name of the object to look up.
+
+        Returns
+        -------
+        str or None: scope id if one is found, otherwise None
+        """
+        # Validate object type
+        if object_type != NBCluster:
+            raise ValueError(f"Object type must be '{NBCluster.name}'.")
+
+        # get scope id from relation config
+        relation_name = "cluster_scope_id_relation"
+        scope_id = self.get_object_relation(object_name, relation_name)
+
+        # return None if scope_id is None or not a string
+        if scope_id is None:
+            log.debug(f"No scope id found for {object_name}.")
+            return None
+        if type(scope_id) is not str:
+            log.debug(f"scope_id is type: {type(scope_id)}, not str")
+            return None
+
+        log.debug2(f"Retrieved scope id '{scope_id}' for {object_type.name} '{object_name}' from relation '{relation_name}'. End of method.")
+
+        return scope_id
 
     def get_object_based_on_macs(self, object_type, mac_list=None):
         """
@@ -613,7 +735,10 @@ class VMWareHandler(SourceBase):
 
             ip = None
             if device_primary_ip is not None and ip_needle is not None:
-                if isinstance(device_primary_ip, dict):
+                if isinstance(device_primary_ip, NBIPAddress):
+                    ip = grab(device_primary_ip, "data.address")
+
+                elif isinstance(device_primary_ip, dict):
                     ip = grab(device_primary_ip, "address")
 
                 elif isinstance(device_primary_ip, int):
@@ -681,18 +806,29 @@ class VMWareHandler(SourceBase):
 
                 # noinspection PyBroadException
                 try:
-                    tag_name = self.tag_session.tagging.Tag.get(tag_id).name
-                    tag_description = self.tag_session.tagging.Tag.get(tag_id).description
+                    tag = self.tag_session.tagging.Tag.get(tag_id)  # store the object
+                    tag_name = tag.name
+                    tag_description = tag.description
                 except Exception as e:
                     log.error(f"Unable to retrieve vCenter tag '{tag_id}' for '{obj.name}': {e}")
-                    continue
+                    continue  # skip tag entirely if basic fetch fails
+
+                category_name = None
+                if bool(self.settings.tag_name_include_category) is True:
+                    # noinspection PyBroadException
+                    try:
+                        category_name = self.tag_session.tagging.Category.get(tag.category_id).name
+                    except Exception as e:
+                        log.debug(f"Unable to retrieve category of vCenter tag '{tag_name}': {e}")
 
                 if tag_name is not None:
-
                     if tag_description is not None and len(f"{tag_description}") > 0:
                         tag_description = f"{primary_tag_name}: {tag_description}"
                     else:
                         tag_description = primary_tag_name
+
+                    if category_name is not None:
+                        tag_name = f"{category_name}:{tag_name}"
 
                     tag_list.append(self.inventory.add_update_object(NBTag, data={
                         "name": tag_name,
@@ -824,6 +960,28 @@ class VMWareHandler(SourceBase):
                     memory_unit = "TB"
 
                 return_custom_fields[grab(custom_field, "data.name")] = f"{memory_size} {memory_unit}"
+
+        # add VMware Tools guest hostname to VM
+        if object_type == "virtualization.virtualmachine" and self.settings.vm_guest_hostname_custom_field:
+
+            guest_hostname_field_name = self.settings.vm_guest_hostname_custom_field
+            guest_hostname = get_string_or_none(grab(obj, "guest.hostName"))
+
+            if guest_hostname is not None:
+                custom_field = self.add_update_custom_field({
+                    "name": guest_hostname_field_name,
+                    "label": "VMware Guest Hostname",
+                    "object_types": [object_type],
+                    "type": "text",
+                    "description": "Hostname reported by VMware Tools from inside the guest OS"
+                })
+
+                return_custom_fields[grab(custom_field, "data.name")] = guest_hostname
+
+            else:
+                log.debug2(f"VM '{grab(obj, 'name')}' guest hostname not reported by VMware Tools "
+                           "(not installed, not running or no data available yet). Keeping current "
+                           f"value of custom field '{guest_hostname_field_name}' untouched.")
 
         field_definition = {grab(k, "key"): grab(k, "name") for k in grab(obj, "availableField", fallback=list())}
 
@@ -1039,6 +1197,10 @@ class VMWareHandler(SourceBase):
                        (object_type.name, device_vm_object.get_display_name(including_second_key=True)))
 
         # keep searching if no exact match was found
+        elif object_type == NBVM and self.settings.match_vm_by_mac_address is False:
+
+            log.debug2("Matching VMs by MAC address is disabled via 'match_vm_by_mac_address'. Skipping.")
+
         else:
 
             log.debug2(f"No exact match found. Trying to find {object_type.name} based on MAC addresses")
@@ -1066,7 +1228,8 @@ class VMWareHandler(SourceBase):
                                                               data={"asset_tag": object_data.get("asset_tag")})
 
         # look for VMs with same serial
-        if object_type == NBVM and device_vm_object is None and object_data.get("serial") is not None:
+        if object_type == NBVM and device_vm_object is None and object_data.get("serial") is not None and \
+                self.settings.match_vm_by_serial is True:
             log.debug2(f"No match found. Trying to find {object_type.name} based on serial number")
             device_vm_object = self.inventory.get_by_data(object_type, data={"serial": object_data.get("serial")})
 
@@ -1075,6 +1238,10 @@ class VMWareHandler(SourceBase):
                        (object_type.name, device_vm_object.get_display_name(including_second_key=True)))
 
         # keep looking for devices with the same primary IP
+        elif object_type == NBVM and self.settings.match_vm_by_ip_address is False:
+
+            log.debug2("Matching VMs by primary IP address is disabled via 'match_vm_by_ip_address'. Skipping.")
+
         else:
 
             log.debug2(f"No match found. Trying to find {object_type.name} based on primary IP addresses")
@@ -1084,6 +1251,11 @@ class VMWareHandler(SourceBase):
         if device_vm_object is None:
             object_name = object_data.get(object_type.primary_key)
             log.debug(f"No existing {object_type.name} object for {object_name}. Creating a new {object_type.name}.")
+
+            if object_type == NBVM and self.settings.vm_status_on_create is not None and \
+                    object_data.get("status") is not None:
+                object_data["status"] = self.settings.vm_status_on_create
+
             device_vm_object = self.inventory.add_object(object_type, data=object_data, source=self)
         else:
 
@@ -1094,6 +1266,22 @@ class VMWareHandler(SourceBase):
             if object_type == NBDevice and self.settings.overwrite_device_platform is False and \
                     object_data.get("platform") is not None:
                 del object_data["platform"]
+
+            # a device type made up from a BIOS placeholder carries no information. Keep the one
+            # already set in NetBox instead of replacing it on every run (issue #460)
+            if object_type == NBDevice and object_data.get("device_type") is not None and \
+                    self.hardware_identifier_is_unknown(grab(object_data, "device_type.model")):
+                del object_data["device_type"]
+
+            if object_type == NBVM and object_data.get("status") is not None:
+                current_status = grab(device_vm_object, "data.status")
+                if isinstance(current_status, dict):
+                    current_status = current_status.get("value")
+                if current_status in (self.settings.vm_status_preserve or list()):
+                    log.debug2(f"Current status '{current_status}' of "
+                               f"'{device_vm_object.get_display_name()}' is in 'vm_status_preserve' list. "
+                               f"Not updating VM status.")
+                    del object_data["status"]
 
             device_vm_object.update(data=object_data, source=self)
 
@@ -1128,30 +1316,64 @@ class VMWareHandler(SourceBase):
         if version.parse(self.inventory.netbox_api_version) >= version.parse("3.7.0") and \
                 object_type == NBVM and disk_data is not None and len(disk_data) > 0:
 
-            # create pairs of existing and discovered disks.
-            # currently these disks are only used within the VM model. that's why we use this simple approach and
-            # just rewrite disk as they appear in order.
-            # otherwise we would need to implement a matching function like matching interfaces.
-            disk_zip_list = zip_longest(
-                sorted(device_vm_object.get_virtual_disks(), key=lambda x: grab(x, "data.name")),
-                sorted(disk_data, key=lambda x: x.get("name")),
-                fillvalue="X")
+            # Skip disk updates for VMs that match exclusion filters
+            skip_disk_sync = False
+            
+            # Check if VM name matches vm_exclude_disk_sync filter
+            if hasattr(self.settings, 'vm_exclude_disk_sync') and self.settings.vm_exclude_disk_sync is not None:
+                if self.settings.vm_exclude_disk_sync.match(object_data.get("name")):
+                    log.debug(f"VM '{object_data.get('name')}' matches vm_exclude_disk_sync filter. "
+                              f"Skipping disk synchronization.")
+                    skip_disk_sync = True
+            
+            # Check if VM has any tags that match vm_exclude_disk_sync_by_tag filter
+            if not skip_disk_sync and hasattr(self.settings, 'vm_exclude_disk_sync_by_tag') and \
+                    self.settings.vm_exclude_disk_sync_by_tag is not None:
+                vm_tags = [NetBoxObject.extract_tag_name(tag) for tag in device_vm_object.data.get("tags", list())]
+                for exclude_tag in self.settings.vm_exclude_disk_sync_by_tag:
+                    if exclude_tag in vm_tags:
+                        log.debug(f"VM '{object_data.get('name')}' has tag '{exclude_tag}' which matches "
+                                  f"vm_exclude_disk_sync_by_tag filter. Skipping disk synchronization.")
+                        skip_disk_sync = True
+                        break
+            
+            if not skip_disk_sync:
+                # create pairs of existing and discovered disks.
+                # currently these disks are only used within the VM model. that's why we use this simple approach and
+                # just rewrite disk as they appear in order.
+                # otherwise we would need to implement a matching function like matching interfaces.
+                disk_zip_list = zip_longest(
+                    sorted(device_vm_object.get_virtual_disks(), key=lambda x: grab(x, "data.name")),
+                    sorted(disk_data, key=lambda x: x.get("name")),
+                    fillvalue="X")
 
-            for existing, discovered in disk_zip_list:
-                if existing == "X":
-                    self.inventory.add_object(NBVirtualDisk, source=self,
-                                              data={**discovered, **{"virtual_machine": device_vm_object}}, )
-                elif discovered == "X":
-                    log.info(f"{existing.name} '{existing.get_display_name(including_second_key=True)}' has been deleted")
-                    existing.deleted = True
-                else:
-                    existing.update(data=discovered, source=self)
+                for existing, discovered in disk_zip_list:
+                    if existing == "X":
+                        self.inventory.add_object(NBVirtualDisk, source=self,
+                                                  data={**discovered, **{"virtual_machine": device_vm_object}}, )
+                    elif discovered == "X":
+                        log.info(f"{existing.name} '{existing.get_display_name(including_second_key=True)}' has been deleted")
+                        existing.deleted = True
+                    else:
+                        existing.update(data=discovered, source=self)
 
         # compile all nic data into one dictionary
         if object_type == NBVM:
             nic_data = vnic_data
+            interface_exclude_filter = self.settings.vm_interface_exclude_filter
         else:
             nic_data = {**pnic_data, **vnic_data}
+            interface_exclude_filter = self.settings.host_interface_exclude_filter
+
+        # exclude discovered interfaces which match the exclude filter
+        if interface_exclude_filter is not None:
+            for int_name in list(nic_data.keys()):
+                if interface_exclude_filter.match(int_name):
+                    log.debug(f"Discovered interface '{int_name}' matches interface_exclude_filter. "
+                              f"Excluding it from sync")
+                    del nic_data[int_name]
+                    if nic_ips is not None:
+                        nic_ips.pop(int_name, None)
 
         # map interfaces of existing object with discovered interfaces
         nic_object_dict = self.map_object_interfaces_to_current_interfaces(device_vm_object, nic_data)
@@ -1378,8 +1600,19 @@ class VMWareHandler(SourceBase):
                                       self.settings.cluster_include_filter,
                                       self.settings.cluster_exclude_filter) is False:
             return
+        log.debug2(f"Cluster '{name}' passes include and exclude filters. Continuing.")
+
+        # get scope type and id, or site name
+        scope_type = self.get_scope_type(NBCluster, full_cluster_name)
+        if scope_type is None:
+            scope_type = self.get_scope_type(NBCluster, name)
 
         site_name = self.get_site_name(NBCluster, full_cluster_name)
+
+        scope_id = self.get_scope_id(NBCluster, full_cluster_name)
+        if scope_id is None:
+            scope_id = self.get_scope_id(NBCluster, name)
+        log.debug(f"Cluster '{full_cluster_name}' has scope id '{scope_id}' of type {type(scope_id)}.")
 
         data = {
             "name": name,
@@ -1388,11 +1621,26 @@ class VMWareHandler(SourceBase):
         }
 
         if version.parse(self.inventory.netbox_api_version) >= version.parse("4.2.0"):
-            if site_name is not None:
-                data["scope_id"] = {"name": site_name}
+            # set the scope type and id if they are defined
+            if scope_type is not None:
+                data["scope_type"] = scope_type
+                data["scope_id"] = scope_id
+                log.debug(f"Cluster '{full_cluster_name}' (or {name}) has scope type '{scope_type}' "
+                          f"and scope id '{scope_id}'.")
+            elif site_name is not None:
+                # NetBox wants the id of the scoped object, so the site has to be a real
+                # object here. A plain dict is sent as is and rejected with
+                # "scope_id: A valid integer is required."
                 data["scope_type"] = "dcim.site"
+                data["scope_id"] = self.inventory.add_update_object(NBSite, data={"name": site_name})
+            else:
+                log.debug(f"Cluster '{full_cluster_name}' has no scope type or scope id.")
         else:
-            data["site"] = {"name": site_name}
+            # set site_name in the pre-4.2.0 NetBox versions if one is found
+            if site_name is not None:
+                data["site"] = {"name": site_name}
+
+        log.debug(f"Cluster '{full_cluster_name}' (or {name}) has data items '{data.items()}'.")
 
         tenant_name = self.get_object_relation(full_cluster_name, "cluster_tenant_relation")
         if tenant_name is not None:
@@ -1411,11 +1659,12 @@ class VMWareHandler(SourceBase):
             if grab(cluster_candidate, "data.name") != name:
                 continue
 
-            # try to find a cluster with matching site
-            if cluster_candidate.get_site_name() == site_name:
-                cluster_object = cluster_candidate
-                log.debug2("Found an existing cluster where 'name' and 'site' are matching")
-                break
+            if site_name is not None:
+                # try to find a cluster with matching site
+                if cluster_candidate.get_site_name() == site_name:
+                    cluster_object = cluster_candidate
+                    log.debug2("Found an existing cluster where 'name' and 'site' are matching")
+                    break
 
             if grab(cluster_candidate, "data.group") is not None and \
                     grab(cluster_candidate, "data.group.data.name") == group_name:
@@ -1626,11 +1875,11 @@ class VMWareHandler(SourceBase):
         platform = f"{product_name} {product_version}"
         platform = self.get_object_relation(platform, "host_platform_relation", fallback=platform)
 
-        # if the device vendor/model cannot be retrieved (due to problem on the host),
-        # set a dummy value so the host still gets synced
-        if manufacturer is None:
+        # if the device vendor/model cannot be retrieved (due to problem on the host) or the BIOS
+        # only reports a placeholder, set a dummy value so the host still gets synced
+        if self.hardware_identifier_is_unknown(manufacturer):
             manufacturer = "Generic Vendor"
-        if model is None:
+        if self.hardware_identifier_is_unknown(model):
             model = "Generic Model"
 
         # get status
@@ -1660,12 +1909,9 @@ class VMWareHandler(SourceBase):
 
         if self.settings.collect_hardware_asset_tag is True and "AssetTag" in identifier_dict.keys():
 
-            banned_tags = ["Default string", "NA", "N/A", "None", "Null", "oem", "o.e.m",
-                           "to be filled by o.e.m.", "Unknown"]
-
             this_asset_tag = identifier_dict.get("AssetTag")
 
-            if this_asset_tag.lower() not in [x.lower() for x in banned_tags]:
+            if not self.hardware_identifier_is_unknown(this_asset_tag):
                 asset_tag = this_asset_tag
 
         # get host_tenant_relation
@@ -1777,7 +2023,11 @@ class VMWareHandler(SourceBase):
         except Exception:
             pass
 
-        for pnic in grab(obj, "config.network.pnic", fallback=list()):
+        pnic_list = grab(obj, "config.network.pnic", fallback=list())
+        if self.settings.skip_host_nics is True:
+            log.debug(f"Skipping physical interfaces of host '{name}' (skip_host_nics)")
+            pnic_list = list()
+        for pnic in pnic_list:
 
             pnic_name = grab(pnic, "device")
             pnic_key = grab(pnic, "key")
@@ -2098,7 +2348,8 @@ class VMWareHandler(SourceBase):
         # get VM UUID
         vm_uuid = grab(obj, "config.instanceUuid")
 
-        if vm_uuid is None or vm_uuid in self.processed_vm_uuid and obj not in self.objects_to_reevaluate:
+        if (vm_uuid is None or vm_uuid in self.processed_vm_uuid) and \
+                not (self.parsing_objects_to_reevaluate is True and obj in self.objects_to_reevaluate):
             return
 
         log.debug(f"Parsing vCenter VM: {name}")
@@ -2230,8 +2481,9 @@ class VMWareHandler(SourceBase):
         vcenter_tags = self.collect_object_tags(obj)
 
         # check if VM tag excludes VM from being synced to NetBox
+        vcenter_tag_names = [NetBoxObject.extract_tag_name(t) for t in vcenter_tags]
         for sync_exclude_tag in self.settings.vm_exclude_by_tag_filter or list():
-            if sync_exclude_tag in vcenter_tags:
+            if sync_exclude_tag in vcenter_tag_names:
                 log.debug(f"Virtual machine vCenter tag '{sync_exclude_tag}' in matches 'vm_exclude_by_tag_filter'. "
                           f"Skipping")
                 return
@@ -2572,6 +2824,25 @@ class VMWareHandler(SourceBase):
                     continue
 
                 nic_data[int_full_name] = vm_nic_data
+
+        # if VM has only one IPv4 on all interfaces, use it as primary IPv4 address
+        if vm_primary_ip4 is None:
+            potential_primary_ipv4_list = list()
+
+            for ip in [y for xs in nic_ips.values() for y in xs]:
+                # noinspection PyBroadException
+                try:
+                    ip_address_object = ip_interface(ip)
+                except Exception:
+                    continue
+
+                if ip_address_object.version == 4:
+                    potential_primary_ipv4_list.append(ip_address_object)
+
+            if len(potential_primary_ipv4_list) == 1:
+                log.debug(f"Found one IPv4 '{potential_primary_ipv4_list[0]}' address on all interfaces of "
+                          f"VM '{name}', using it as primary IPv4.")
+                vm_primary_ip4 = potential_primary_ipv4_list[0]
 
         # if VM has only one IPv6 on all interfaces, use it as primary IPv6 address
         if vm_primary_ip6 is None or True:

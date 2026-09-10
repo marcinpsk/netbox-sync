@@ -26,7 +26,8 @@ class NetBoxConfig(ConfigBase):
             ConfigOption("api_token",
                          str,
                          description="""Requires an NetBox API token with full permissions on all objects except
-                         'auth', 'secrets' and 'users'
+                         'auth', 'secrets' and 'users'.
+                         Both v1 (legacy) and v2 (NetBox 4.5+, nbt_ prefix) tokens are supported.
                          """,
                          config_example="XYZ",
                          mandatory=True,
@@ -96,6 +97,30 @@ class NetBoxConfig(ConfigBase):
                          this config file (https://github.com/bb-Ricardo/netbox-sync/issues/176)
                          """,
                          default_value=False),
+
+            ConfigOption("orphaned_device_status",
+                         str,
+                         description="""Set the status of orphaned devices to this value. If undefined
+                         the status of a device is never changed by this program. Needs to be a valid
+                         device status in NetBox (i.e: 'decommissioning', 'offline', 'planned') and
+                         requires 'prune_enabled' to be true, as pruning is switched off whenever a
+                         source was unavailable. Once a device is reported by a source again its
+                         status is set back to 'active', but only if it still carries the status
+                         defined here
+                         """,
+                         config_example="decommissioning"),
+
+            ConfigOption("orphaned_vm_status",
+                         str,
+                         description="""Set the status of orphaned virtual machines to this value. If
+                         undefined the status of a virtual machine is never changed by this program.
+                         Needs to be a valid virtual machine status in NetBox (i.e: 'decommissioning',
+                         'offline', 'planned') and requires 'prune_enabled' to be true, as pruning is
+                         switched off whenever a source was unavailable. Once a virtual machine is
+                         reported by a source again its status is set back to 'active', but only if it
+                         still carries the status defined here
+                         """,
+                         config_example="decommissioning"),
 
             ConfigOption("default_netbox_result_limit",
                          int,

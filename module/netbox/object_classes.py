@@ -377,7 +377,7 @@ class NetBoxObject:
                     if isinstance(data_value, list):
                         new_data_value = list()
                         for possible_option in data_value:
-                            if type(possible_option) == type:
+                            if type(possible_option) is type:
                                 new_data_value.append(str(possible_option))
                             else:
                                 new_data_value.append(possible_option)
@@ -385,7 +385,7 @@ class NetBoxObject:
                         data_value = new_data_value
 
                     # if value is class name then print class name
-                    if type(data_value) == type:
+                    if type(data_value) is type:
                         data_value = str(data_value)
 
                     data_model[data_key] = data_value
@@ -458,7 +458,7 @@ class NetBoxObject:
         # Enforce max length
         return text[0:max_len]
 
-    def get_uniq_slug(self, text=None, max_len=50)-> str:
+    def get_uniq_slug(self, text=None, max_len=50) -> str:
         """
         return an uniq slug. If the default slug is already used try to
         append a number until a slug is found which has not been used.
@@ -480,7 +480,7 @@ class NetBoxObject:
         if self.inventory.slug_used(self.__class__, slug) is False:
             return slug
 
-        for x in range(1,20):
+        for x in range(1, 20):
             new_slug = f"{slug}-{x}"
             if self.inventory.slug_used(self.__class__, new_slug) is False and len(new_slug) <= max_len:
                 log.info(f"Slug '{slug}' for {self.name} '{text}' has been used. "
@@ -552,7 +552,6 @@ class NetBoxObject:
 
         parsed_data = dict()
         for key, value in data.items():
-
             if key not in self.data_model.keys():
                 log.error(f"Found undefined data model key '{key}' for object '{self.__class__.__name__}'")
                 continue
@@ -686,27 +685,47 @@ class NetBoxObject:
 
                 # Fix for object/multi-object custom fields
                 # When patching, we only need the IDs, not the full object representation
-                new_value_copy = new_value.copy()
-                for field_name, field_value in new_value_copy.items():
-                    # Check for custom field type
-                    custom_field = self.inventory.get_by_data(NBCustomField, data={"name": field_name})
-                    if custom_field is not None:
+                # returned by the NetBox API. The values of the current AND the new data
+                # need to be reduced. Reducing only the new values would miss unchanged
+                # object custom fields which get merged into the update from the current
+                # data, and comparing reduced to unreduced values would report a change
+                # on every run.
+                def reduce_object_custom_fields_to_ids(custom_field_data: dict) -> dict:
+
+                    reduced_data = dict(custom_field_data)
+                    for field_name, field_value in custom_field_data.items():
+                        # Check for custom field type
+                        custom_field = self.inventory.get_by_data(NBCustomField, data={"name": field_name})
+                        if custom_field is None:
+                            continue
+
                         field_type = grab(custom_field, "data.type")
 
+                        # custom fields read from the NetBox API report the type as
+                        # a dict like {"value": "multiobject", "label": "Multiple objects"}
+                        if isinstance(field_type, dict):
+                            field_type = field_type.get("value")
+
                         # Handle object type custom fields - need only ID
-                        if field_type == "object" and isinstance(field_value, dict) and field_value.get('id') is not None:
-                            new_value[field_name] = field_value.get('id')
+                        if field_type == "object" and isinstance(field_value, dict) and \
+                                field_value.get('id') is not None:
+                            reduced_data[field_name] = field_value.get('id')
 
                         # Handle multi-object type custom fields - need list of IDs
-                        elif field_type == "multi-object" and isinstance(field_value, list):
+                        # NetBox reports the type of these fields as 'multiobject'
+                        elif field_type in ("multiobject", "multi-object") and isinstance(field_value, list):
                             ids = []
                             for item in field_value:
                                 if isinstance(item, dict) and item.get('id') is not None:
                                     ids.append(item.get('id'))
                             if ids:
-                                new_value[field_name] = ids
+                                reduced_data[field_name] = ids
 
-                new_value = {**current_value, **new_value}
+                    return reduced_data
+
+                current_value = reduce_object_custom_fields_to_ids(current_value)
+                current_value_str = str(current_value)
+                new_value = {**current_value, **reduce_object_custom_fields_to_ids(new_value)}
                 new_value_str = str(new_value)
             elif isinstance(new_value, (NetBoxObject, NBObjectList)):
                 new_value_str = str(new_value.get_display_name())
@@ -1312,7 +1331,8 @@ class NBCustomField(NetBoxObject):
             "object_types": list,
             # field name (object_types) for NetBox < 4.0.0
             "content_types": list,
-            "type": ["text", "longtext", "integer", "boolean", "date", "url", "json", "select", "multiselect", "object", "multi-object"],
+            "type": ["text", "longtext", "integer", "boolean", "date", "url", "json", "select", "multiselect", "object",
+                     "multiobject", "multi-object"],
             "name": 50,
             "label": 50,
             "description": 200,
@@ -1425,39 +1445,39 @@ class NBTenant(NetBoxObject):
         super().__init__(*args, **kwargs)
 
 
-# class NBLocation(NetBoxObject):
-#     name = "location"
-#     api_path = "dcim/locations"
-#     object_type = "dcim.location"
-#     primary_key = "name"
-#     prune = False
-#     read_only = True
-#
-#     def __init__(self, *args, **kwargs):
-#         self.data_model = {
-#             "name": 100,
-#             "slug": 100,
-#             "site": NBSite,
-#             "tags": NBTagList
-#         }
-#         super().__init__(*args, **kwargs)
-#
-#
-# class NBRegion(NetBoxObject):
-#     name = "region"
-#     api_path = "dcim/regions"
-#     object_type = "dcim.region"
-#     primary_key = "name"
-#     prune = False
-#     read_only = True
-#
-#     def __init__(self, *args, **kwargs):
-#         self.data_model = {
-#             "name": 100,
-#             "slug": 100,
-#             "tags": NBTagList
-#         }
-#         super().__init__(*args, **kwargs)
+class NBLocation(NetBoxObject):
+    name = "location"
+    api_path = "dcim/locations"
+    object_type = "dcim.location"
+    primary_key = "name"
+    prune = False
+    read_only = True
+
+    def __init__(self, *args, **kwargs):
+        self.data_model = {
+            "name": 100,
+            "slug": 100,
+            "site": NBSite,
+            "tags": NBTagList
+        }
+        super().__init__(*args, **kwargs)
+
+
+class NBRegion(NetBoxObject):
+    name = "region"
+    api_path = "dcim/regions"
+    object_type = "dcim.region"
+    primary_key = "name"
+    prune = False
+    read_only = True
+
+    def __init__(self, *args, **kwargs):
+        self.data_model = {
+            "name": 100,
+            "slug": 100,
+            "tags": NBTagList
+        }
+        super().__init__(*args, **kwargs)
 
 
 class NBSite(NetBoxObject):
@@ -1700,7 +1720,6 @@ class NBPrefix(NetBoxObject):
 
         super().update(data=data, read_from_netbox=read_from_netbox, source=source)
 
-
     def resolve_relations(self):
 
         self.resolve_scoped_relations("scope_id", "scope_type")
@@ -1869,14 +1888,14 @@ class NBCluster(NetBoxObject):
     api_path = "virtualization/clusters"
     object_type = "virtualization.cluster"
     primary_key = "name"
-    secondary_key = "site"
+    secondary_key = "scope_id"
     prune = False
-    # include_secondary_key_if_present = True
 
     def __init__(self, *args, **kwargs):
         self.mapping = NetBoxMappings()
+        # scope types allowed for clusters
         self.scopes = [
-            NBSite, NBSiteGroup
+            NBSite, NBSiteGroup, NBLocation, NBRegion
         ]
         self.data_model = {
             "name": 100,
@@ -1885,28 +1904,22 @@ class NBCluster(NetBoxObject):
             "tenant": NBTenant,
             "group": NBClusterGroup,
             "scope_type": self.mapping.scopes_object_types(self.scopes),
-            # currently only site is supported as a scope
-            "scope_id": NBSite,
+            # supports scoped clusters
+            "scope_id": self.scopes,
+            # supports pre4.2.0 clusters with site
+            "site": NBSite,
             "tags": NBTagList
         }
         super().__init__(*args, **kwargs)
 
     def update(self, data=None, read_from_netbox=False, source=None):
 
-        # Add adaption for change in NetBox 4.2.0 Device model
-        if version.parse(self.inventory.netbox_api_version) >= version.parse("4.2.0"):
-            if data.get("site") is not None:
-                data["scope_id"] = data.get("site")
-                data["scope_type"] = "dcim.site"
-                del data["site"]
-
-            if data.get("scope_id") is not None:
-                data["scope_type"] = "dcim.site"
-
         super().update(data=data, read_from_netbox=read_from_netbox, source=source)
 
     def resolve_relations(self):
-
+        log.debug2(f"Resolving relations for {self.name} '{self.get_display_name()}'")
+        # NetBox reports the scope as an id, turn it back into the object it points to,
+        # otherwise every run sees a change from the id to the object and updates the cluster
         self.resolve_scoped_relations("scope_id", "scope_type")
         super().resolve_relations()
 
@@ -2065,9 +2078,7 @@ class NBInterface(NetBoxObject):
             "mark_connected": bool,
             "tags": NBTagList,
             "parent": object,
-            # the module this interface belongs to (NBModule is defined later in this module,
-            # the reference is resolved at instantiation time). NetBox cascade-deletes module
-            # components, so deleting the module removes its interfaces.
+            # NetBox cascade-deletes module components, so the module owns its interfaces
             "module": NBModule
         }
         super().__init__(*args, **kwargs)
@@ -2245,6 +2256,7 @@ class NBIPAddress(NetBoxObject):
         if o_type is not None:
             self.unset_attribute("assigned_object_type")
 
+
 class NBMACAddress(NetBoxObject):
     name = "MAC address"
     api_path = "dcim/mac-addresses"
@@ -2404,9 +2416,7 @@ class NBPowerPort(NetBoxObject):
             "mark_connected": bool,
             "tags": NBTagList,
             "custom_fields": NBCustomField,
-            # the module (power supply) this port belongs to (NBModule is defined later in this
-            # module, the reference is resolved at instantiation time). NetBox cascade-deletes
-            # module components, so deleting the PSU module removes its power port.
+            # the PSU module owns its power port, NetBox cascade-deletes it with the module
             "module": NBModule
         }
         super().__init__(*args, **kwargs)

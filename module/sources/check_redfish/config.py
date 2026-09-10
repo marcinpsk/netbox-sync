@@ -46,19 +46,19 @@ class CheckRedfishConfig(ConfigBase):
                          overwrites the device host name in NetBox""",
                          default_value=False),
 
-            ConfigOption("model_components_as_modules",
-                         bool,
-                         description="""model discovered hardware components (CPUs, memory, drives,
-                         controllers, NICs, ...) as NetBox modules instead of the deprecated inventory
-                         items. Requires NetBox >= 4.3, on older versions inventory items are used""",
-                         default_value=False),
-
             ConfigOption("dell_serial_from_service_tag",
                          bool,
                          description="""for Dell devices, use the Service Tag as the NetBox device
                          serial number (matching what dmidecode and the OS report) instead of the
                          system serial number. The original system serial number (the Dell PPID)
                          is then stored in the 'system_serial' custom field""",
+                         default_value=False),
+
+            ConfigOption("model_components_as_modules",
+                         bool,
+                         description="""model discovered hardware components (CPUs, memory, drives,
+                         controllers, NICs, ...) as NetBox modules instead of the deprecated inventory
+                         items. Requires NetBox >= 4.3, on older versions inventory items are used""",
                          default_value=False),
 
             ConfigOption("overwrite_power_supply_name",
@@ -83,6 +83,12 @@ class CheckRedfishConfig(ConfigBase):
                          bool,
                          description="""define if existing interface attributes are overwritten with data discovered
                          via check_redfish if False only data which is not preset in NetBox will be added""",
+                         default_value=False),
+
+            ConfigOption("skip_fhrp_group_ips",
+                         bool,
+                         description="""define if an IP address assigned to a FHRP group (like HSRP, VRRP, GLBP) will be skipped.
+                         If True this IP address will be skipped and not synced to NetBox to prevent incorrect syncing.""",
                          default_value=False),
 
             ConfigOption(**config_option_ip_tenant_inheritance_order_definition),
