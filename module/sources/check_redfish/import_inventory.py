@@ -16,7 +16,7 @@ from packaging import version
 from module.sources.common.source_base import SourceBase
 from module.sources.check_redfish.config import CheckRedfishConfig
 from module.common.logging import get_logger
-from module.common.misc import grab, get_string_or_none
+from module.common.misc import grab, get_string_or_none, get_name_part_or_none
 from module.common.support import normalize_mac_address
 from module.netbox.inventory import NetBoxInventory
 from module.netbox import *
@@ -598,7 +598,7 @@ class CheckRedfish(SourceBase):
             size_in_byte = grab(pd, "size_in_byte", fallback=0)
             model = get_string_or_none(grab(pd, "model"))
             speed_in_rpm = grab(pd, "speed_in_rpm")
-            location = get_string_or_none(grab(pd, "location"))
+            location = get_name_part_or_none(grab(pd, "location"))
             bay = get_string_or_none(grab(pd, "bay"))
             pd_type = get_string_or_none(grab(pd, "type"))
             serial = get_string_or_none(grab(pd, "serial"))
@@ -662,7 +662,7 @@ class CheckRedfish(SourceBase):
 
             name = get_string_or_none(grab(sc, "name"))
             model = get_string_or_none(grab(sc, "model"))
-            location = get_string_or_none(grab(sc, "location"))
+            location = get_name_part_or_none(grab(sc, "location"))
             logical_drive_ids = grab(sc, "logical_drive_ids", fallback=list())
             physical_drive_ids = grab(sc, "physical_drive_ids", fallback=list())
             cache_size_in_mb = grab(sc, "cache_size_in_mb")
@@ -705,7 +705,7 @@ class CheckRedfish(SourceBase):
 
             name = get_string_or_none(grab(se, "name"))
             model = get_string_or_none(grab(se, "model"))
-            location = get_string_or_none(grab(se, "location"))
+            location = get_name_part_or_none(grab(se, "location"))
             num_bays = get_string_or_none(grab(se, "num_bays"))
 
             if name.lower().startswith("hp") and model is not None:
