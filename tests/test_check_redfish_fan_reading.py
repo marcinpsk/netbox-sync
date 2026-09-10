@@ -1,9 +1,8 @@
-"""A fan's tachometer reading is a live measurement and is not stored.
+"""The fan reading must not reach a module either.
 
-Every other component reports a nameplate speed: a DIMM's MHz, a CPU's GHz, a NIC's link
-speed, a drive's rated RPM. Those do not change between scans. A fan's reading is its
-current RPM or duty percentage, which drifts with thermal load, so storing it rewrote the
-fan on nearly every sync and filled the NetBox changelog with readings.
+test_check_redfish_fan_speed.py covers the inventory item path. These cover the module
+backend, which that test cannot reach, and guard the nameplate speeds every other
+component reports, which must still be stored.
 """
 
 from module.netbox.object_classes import NBInventoryItem, NBModule
@@ -38,19 +37,6 @@ def test_module_is_not_rewritten_when_the_fan_reading_drifts(check_redfish_sourc
     sync(context, 4320)
 
     assert module.updated_items == []
-
-
-def test_inventory_item_is_not_rewritten_when_the_fan_reading_drifts(check_redfish_source):
-    """The same on the deprecated backend, which stores the reading in the same field."""
-
-    context = check_redfish_source()
-    sync(context, 4200)
-    item = only(context, NBInventoryItem)
-    item.updated_items = list()
-
-    sync(context, 4320)
-
-    assert item.updated_items == []
 
 
 def test_fan_health_is_still_synced(check_redfish_source):

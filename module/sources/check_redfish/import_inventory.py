@@ -481,13 +481,12 @@ class CheckRedfish(SourceBase):
             health_status = get_string_or_none(grab(fan, "health_status"))
             physical_context = get_string_or_none(grab(fan, "physical_context"))
             fan_id = get_string_or_none(grab(fan, "id"))
-
             description = list()
             if physical_context is not None:
                 description.append(f"Context: {physical_context}")
 
-            # the reading is the fan's current RPM or duty, not a nameplate value like every
-            # other component's speed, so storing it rewrote the fan on nearly every sync
+            # a fan's reading is a live measurement, not something the inventory describes.
+            # Writing it would update this object in NetBox on every single run
             items.append({
                 "description": description,
                 "full_name": f"{fan_name} (ID: {fan_id})",
