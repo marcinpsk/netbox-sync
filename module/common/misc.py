@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#  Copyright (c) 2020 - 2026 Ricardo Bartels. All rights reserved.
+#  Copyright (c) 2020 - 2026 netbox-sync team. All rights reserved.
 #
 #  netbox-sync.py
 #
@@ -159,11 +159,7 @@ def get_string_or_none(text=None):
     """
     Only return stripped content of text if text is not None and not empty
 
-    Structured values (dict/list/set/tuple) are not meaningful names and are rejected with None.
-    Blindly str()-ing them (e.g. a Dell `location` Oem blob) would inject the whole repr into a
-    component name, blow past NetBox's 64-char limit, get truncated on store and then never match
-    on the next sync - recreating the item every run. Scalars (incl. ints, which many callers rely
-    on) keep their str() behavior.
+    A structured value is not a name and returns None. Scalars, including ints, still stringify.
 
     Parameters
     ----------

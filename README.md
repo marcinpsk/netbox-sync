@@ -1,4 +1,3 @@
-
 # NetBox-Sync
 
 This is a tool to sync data from different sources to a NetBox instance.
@@ -30,14 +29,8 @@ This ensures stale objects are removed from NetBox keeping an accurate current s
 
 ## Requirements
 ### Software
-* python >= 3.6
-* packaging
-* urllib3==2.2.1
-* wheel
-* requests==2.31.0
-* pyvmomi==8.0.2.0.1
-* aiodns==3.0.0
-* pyyaml==6.0.1
+* python >= 3.12
+* see [requirements.txt](requirements.txt)
 
 ### Environment
 * NetBox >= 2.9
@@ -49,20 +42,17 @@ This ensures stale objects are removed from NetBox keeping an accurate current s
 # Installing
 * here we assume we install in ```/opt```
 
-## RedHat based OS
-* on RedHat/CentOS 7 you need to install python3.6 and pip from EPEL first
-* on RedHat/CentOS 8 systems the package name changed to `python3-pip`
+## RedHat based distributions
 ```shell
-yum install python36-pip
+yum install python3-pip
 ```
 
-## Ubuntu 18.04 & 20.04 && 22.04
+## Debian (Ubuntu) based distributions
 ```shell
 apt-get update && apt-get install python3-venv
 ```
 
 ## Clone repo and install dependencies
-* If you need to use python 3.6 then you would need `requirements_3.6.txt` to install requirements
 * download and setup of virtual environment
 ```shell
 cd /opt
@@ -76,10 +66,10 @@ pip3 install -r requirements.txt || pip install -r requirements.txt
 ```
 
 ### VMware tag sync (if necessary)
-The `vsphere-automation-sdk` must be installed if tags should be synced from vCenter to NetBox
+The `vcf-sdk` must be installed if tags should be synced from vCenter to NetBox
 * assuming we are still in an activated virtual env
 ```shell
-pip install --upgrade git+https://github.com/vmware/vsphere-automation-sdk-python.git
+pip install --upgrade vcf-sdk
 ```
 
 ## NetBox API token
@@ -88,6 +78,8 @@ In order to updated data in NetBox you need a NetBox API token.
   * auth
   * secrets
   * users
+* Both v1 (legacy) and v2 tokens (NetBox 4.5+, `nbt_` prefix) are supported.
+  The correct authorization header (`Token` or `Bearer`) is detected automatically.
 
 A short description can be found [here](https://docs.netbox.dev/en/stable/integrations/rest-api/#authentication)
 
@@ -99,7 +91,7 @@ usage: netbox-sync.py [-h] [-c settings.ini [settings.ini ...]] [-g]
 
 Sync objects from various sources to NetBox
 
-Version: 1.8.1 (2026-03-18)
+Version: 1.9.0 (2026-10-02)
 Project URL: https://github.com/bb-ricardo/netbox-sync
 
 options:
@@ -215,21 +207,26 @@ In Order to sync all items regularly you can add a cron job like this one
 
 ## Docker
 
-Run the application in a docker container. You can build it yourself or use the ones from docker hub.
+Run the application in a docker container. You can build it yourself or use the published images.
 
-Available here: [bbricardo/netbox-sync](https://hub.docker.com/r/bbricardo/netbox-sync)
+Available here: [ghcr.io/bb-ricardo/netbox-sync](https://github.com/bb-Ricardo/netbox-sync/pkgs/container/netbox-sync)
+
+Images used to be published on Docker Hub as [bbricardo/netbox-sync](https://hub.docker.com/r/bbricardo/netbox-sync).
+v1.9.0 is the last release pushed there; later releases are only published on the GitHub Container Registry,
+so switch the pull address to `ghcr.io/bb-ricardo/netbox-sync`.
 
 * The application working directory is ```/app```
 * Required to mount your ```settings.ini```
+* The NetBox cache is written to ```/app/cache```, mount a volume there to keep it between runs
 
 To build it by yourself just run:
 ```shell
-docker build -t bbricardo/netbox-sync:latest .
+docker build -t ghcr.io/bb-ricardo/netbox-sync:latest .
 ```
 
 To start the container just use:
 ```shell
-docker run --rm -it -v $(pwd)/settings.ini:/app/settings.ini bbricardo/netbox-sync:latest
+docker run --rm -it -v $(pwd)/settings.ini:/app/settings.ini -v netbox-sync-cache:/app/cache ghcr.io/bb-ricardo/netbox-sync:latest
 ```
 
 ## Kubernetes
@@ -294,6 +291,17 @@ Program will exit if all retries failed!
 Check out the documentations for the different sources
 * [vmware](https://github.com/bb-Ricardo/netbox-sync/blob/main/docs/source_vmware.md)
 * [check_redfish](https://github.com/bb-Ricardo/netbox-sync/blob/main/docs/source_check_redfish.md)
+
+### Filtering
+netbox-sync provides various filtering capabilities to control what objects are synced from sources to NetBox:
+
+1. **General VM filtering**: Use `vm_include_filter` and `vm_exclude_filter` to include or exclude VMs by name.
+2. **Tag-based VM filtering**: Use `vm_exclude_by_tag_filter` to exclude VMs with specific vCenter tags.
+3. **Partial information filtering**:
+   - Use `vm_exclude_disk_sync` to exclude disk synchronization for VMs matching specific name patterns.
+   - Use `vm_exclude_disk_sync_by_tag` to exclude disk synchronization for VMs with specific vCenter tags.
+
+These filters allow for fine-grained control over what information is synchronized, helping to avoid clutter in the change log from temporary or backup-related disk changes.
 
 If you have multiple vCenter instances or check_redfish folders just add another source with the same type
 in the **same** file.

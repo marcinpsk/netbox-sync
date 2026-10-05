@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#  Copyright (c) 2020 - 2026 Ricardo Bartels. All rights reserved.
+#  Copyright (c) 2020 - 2026 netbox-sync team. All rights reserved.
 #
 #  netbox-sync.py
 #
@@ -34,6 +34,7 @@ class ConfigOptions:
         if item in self:
             return getattr(self, item)
         return None
+
 
 class ConfigBase:
     """

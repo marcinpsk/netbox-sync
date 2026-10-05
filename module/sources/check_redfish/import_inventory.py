@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#  Copyright (c) 2020 - 2026 Ricardo Bartels. All rights reserved.
+#  Copyright (c) 2020 - 2026 netbox-sync team. All rights reserved.
 #
 #  netbox-sync.py
 #
@@ -22,13 +22,12 @@ from module.common.support import normalize_mac_address
 from module.netbox.inventory import NetBoxInventory
 from module.netbox import *
 
-log = get_logger()
-
-# NetBox limits dcim.modulebay.name to 64 chars. A name longer than this is shortened to a stable
-# prefix plus a short hash of the full name, so two distinct slots that share the first 64 chars
-# still resolve to different bay identities instead of collapsing onto one (see module_bay_name()).
+# NetBox stores dcim.modulebay.name at 64 chars. A longer name is shortened to a prefix plus a
+# short digest of the full name, so two long slots sharing a prefix stay distinct bays.
 MODULE_BAY_NAME_MAX_LENGTH = 64
 MODULE_BAY_NAME_HASH_LENGTH = 8
+
+log = get_logger()
 
 
 class CheckRedfish(SourceBase):
@@ -61,10 +60,14 @@ class CheckRedfish(SourceBase):
         NBVLANGroup,
         NBPowerPort,
         NBInventoryItem,
-        NBModuleType,
+        NBCustomField,
+        # modules are always read back so that interfaces and power ports which reference a
+        # module can resolve that relation, even on a run where the option is off (e.g. after
+        # a user turns it off again). The option only gates whether we *create* components as
+        # modules, not whether we can read existing ones.
         NBModuleBay,
-        NBModule,
-        NBCustomField
+        NBModuleType,
+        NBModule
     ]
 
     source_type = "check_redfish"
@@ -96,8 +99,8 @@ class CheckRedfish(SourceBase):
 
         self.interface_adapter_type_dict = dict()
 
-        # maps a network adapter id to the name of the module bay its NIC module lives in,
-        # used to attach discovered NIC port interfaces to their parent module
+        # maps a network adapter id to the module bay name of its NIC module, so discovered
+        # ports can be attached to their parent module
         self.nic_module_bay_by_adapter_id = dict()
 
     def apply(self):
@@ -121,7 +124,6 @@ class CheckRedfish(SourceBase):
             if self.read_inventory_file_content(filename) is False:
                 continue
 
-            # match this inventory file to an existing NetBox device
             if self.find_device_object(filename) is False:
                 continue
 
@@ -140,35 +142,38 @@ class CheckRedfish(SourceBase):
 
     def find_device_object(self, filename):
         """
-        Match the current inventory file to an existing NetBox device and store it in
-        self.device_object. Matching is tried first by 'meta.inventory_id', then by the
-        system serial number, then by the Dell Service Tag (which may be the persisted
-        serial when dell_serial_from_service_tag was used).
+        Match the current inventory file to a NetBox device and store it in self.device_object.
+        Tried in order: meta.inventory_id, the system serial, then the Dell Service Tag.
 
         Parameters
         ----------
         filename: str
-            inventory file name (used for logging only)
+            inventory file name, used for logging only
 
         Returns
         -------
-        bool: True if a matching device was found, else False
+        bool: True if a matching device was found
         """
 
-        # try to get device by supplied NetBox id
-        inventory_id = grab(self.inventory_file_content, "meta.inventory_id")
+        supplied_id = grab(self.inventory_file_content, "meta.inventory_id")
+        inventory_id = None
 
-        # parse inventory id to int as all NetBox ids are type integer. An absent id is normal -
-        # devices are commonly matched by serial / Service Tag below - so only warn when a value
-        # was actually supplied but is not an integer, and never probe get_by_id() with an invalid
-        # id (which would waste the lookup and muddy the "not found" error logged further down).
-        try:
-            inventory_id = int(inventory_id)
-        except (ValueError, TypeError):
-            if inventory_id is not None:
-                log.warning(f"Value for meta.inventory_id '{inventory_id}' must be an integer. "
-                            f"Cannot use inventory_id to match device in NetBox.")
-            inventory_id = None
+        # bool is a subclass of int and float truncates, so int() would turn both `true` and
+        # `1.9` into the id of a real but unrelated device
+        if isinstance(supplied_id, bool) or not isinstance(supplied_id, (int, str)):
+            parsed_id = None
+        else:
+            try:
+                parsed_id = int(str(supplied_id).strip())
+            except ValueError:
+                parsed_id = None
+
+        if parsed_id is not None and parsed_id > 0:
+            inventory_id = parsed_id
+        elif supplied_id is not None:
+            # an absent id is the normal case, so only warn about a supplied one which is unusable
+            log.warning(f"Value for meta.inventory_id '{supplied_id}' must be a positive integer. "
+                        f"Cannot use inventory_id to match device in NetBox.")
 
         self.device_object = None
         if inventory_id is not None:
@@ -181,19 +186,14 @@ class CheckRedfish(SourceBase):
                         inventory_id))
             return True
 
-        # try to find device by serial of first system in inventory. Normalize it the same way
-        # update_device() does (get_string_or_none) so a padded serial still matches the stored
-        # value, and skip the lookup when there is no serial to avoid probing serial=None (which
-        # would wrongly match a serial-less device before the Service Tag fallback runs)
+        # normalize as update_device() stores it, and never probe serial=None: get_by_data()
+        # compares dicts exactly, so it would match a device which has no serial at all
         device_serial = get_string_or_none(grab(self.inventory_file_content, "inventory.system.0.serial"))
         if device_serial is not None:
             self.device_object = self.inventory.get_by_data(NBDevice, data={"serial": device_serial})
 
-        # a device may have been persisted with the Dell Service Tag as its serial (when
-        # dell_serial_from_service_tag was enabled on a previous run), so match by the Service Tag
-        # as well when the system serial did not resolve an existing device. This must not depend on
-        # the current option value - otherwise disabling the option strands such a device - and
-        # get_service_tag() already self-gates on the device being Dell, so it is safe to try.
+        # unconditional, so disabling the option cannot strand a device already persisted
+        # with its Service Tag as the serial. get_service_tag() self-gates on the vendor.
         if self.device_object is None:
             service_tag = self.get_service_tag()
             if service_tag is not None:
@@ -268,9 +268,8 @@ class CheckRedfish(SourceBase):
 
     def get_service_tag(self):
         """
-        Return the Dell Service Tag (the chassis SKU) for the current inventory file, or None
-        if the device is not a Dell or no Service Tag is available. Centralizes the lookup so
-        device matching (find_device_object) and device update (update_device) agree on it.
+        Return the Dell Service Tag (the chassis SKU), or None when this is not a Dell or no
+        Service Tag is reported. Shared so matching and updating agree on the value.
 
         Returns
         -------
@@ -308,7 +307,6 @@ class CheckRedfish(SourceBase):
             }
         }
 
-        # by default the device serial is the system serial number reported via check_redfish
         serial = system_serial
 
         if name is not None and self.settings.overwrite_host_name is True:
@@ -330,14 +328,10 @@ class CheckRedfish(SourceBase):
 
                 device_data["custom_fields"]["service_tag"] = service_tag
 
-                # optionally use the Dell Service Tag as the device serial number (matching what
-                # dmidecode and the OS report) and keep the original system serial (the Dell PPID)
-                # in its own custom field
                 if grab(self.settings, "dell_serial_from_service_tag", fallback=False) is True:
                     serial = service_tag
 
-                    # guard the write so a transient missing system serial does not overwrite an
-                    # existing system_serial custom field with None
+                    # custom fields are merged, not None-skipped, so a missing value would clear it
                     if system_serial is not None:
                         self.add_update_custom_field({
                             "name": "system_serial",
@@ -371,8 +365,8 @@ class CheckRedfish(SourceBase):
 
         ps_index = 1
         ps_items = list()
-        # remember each power port together with the module bay name of its power supply so we can
-        # link them after the PSU modules are created (via update_all_items) further down
+        # each power port with the bay name of its supply, linked after update_all_items creates
+        # the modules further down
         power_port_links = list()
         for ps in grab(self.inventory_file_content, "inventory.power_supply", fallback=list()):
 
@@ -415,11 +409,9 @@ class CheckRedfish(SourceBase):
             ps_items.append({
                 "health": health_status,
                 "description": description,
-                # the supply's slot is the stable module bay identity, independent of the volatile
-                # AC/DC type embedded in the display name (a swap must reuse the bay, not churn it)
+                # the slot, not the AC/DC bearing display name, so a swap reuses the bay
                 "bay_name": ps_name,
                 "full_name": name,
-                # the supply model is the module type (catalog) identifier when modeling as modules
                 "model": model,
                 "serial": get_string_or_none(grab(ps, "serial")),
                 "manufacturer": get_string_or_none(grab(ps, "vendor")),
@@ -456,23 +448,20 @@ class CheckRedfish(SourceBase):
                 ps_object = self.inventory.add_object(NBPowerPort, data=ps_data, source=self)
             else:
                 if self.settings.overwrite_power_supply_name is False:
-                    del(ps_data["name"])
+                    del (ps_data["name"])
 
                 data_to_update = self.patch_data(ps_object, ps_data, self.settings.overwrite_power_supply_attributes)
                 ps_object.update(data=data_to_update, source=self)
                 current_ps.remove(ps_object)
 
-            # the PSU module lives in the bay keyed on the stable slot (matches module_bay_name)
             power_port_links.append((ps_object, ps_name))
 
             ps_index += 1
 
         self.update_all_items(ps_items, "Power Supply")
 
-        # link each power port to its power-supply module (so NetBox cascade-deletes the port when
-        # the module is removed, mirroring how NIC ports hang off their adapter module) or detach a
-        # now-stale link when modules are off / no module resolves, so an enable -> disable
-        # transition clears the persisted reference instead of leaving incorrect ownership
+        # NetBox cascade-deletes a module's components, so the port must follow its PSU module;
+        # detach a stale link when modules are off or no module resolves
         for power_port, bay_name in power_port_links:
             psu_module = self.find_device_module_by_bay_name(bay_name) if self.use_modules() is True else None
             if psu_module is not None:
@@ -492,13 +481,12 @@ class CheckRedfish(SourceBase):
             health_status = get_string_or_none(grab(fan, "health_status"))
             physical_context = get_string_or_none(grab(fan, "physical_context"))
             fan_id = get_string_or_none(grab(fan, "id"))
-
             description = list()
             if physical_context is not None:
                 description.append(f"Context: {physical_context}")
 
-            # the fan reading is a live measurement and is deliberately not stored: it changes on
-            # every scan, so keeping it here rewrote every fan module on every run
+            # a fan's reading is a live measurement, not something the inventory describes.
+            # Writing it would update this object in NetBox on every single run
             items.append({
                 "description": description,
                 "full_name": f"{fan_name} (ID: {fan_id})",
@@ -530,8 +518,7 @@ class CheckRedfish(SourceBase):
 
             memory_size_total += size_in_mb
 
-            # the slot label (e.g. "DIMM A1") is the stable module bay identity, captured before
-            # the volatile DIMM type is appended to the display name so a swap reuses the bay
+            # the slot label is the stable bay identity, captured before the DIMM type is appended
             dimm_bay = name
 
             name_details = list()
@@ -615,10 +602,9 @@ class CheckRedfish(SourceBase):
             items.append({
                 "description": description,
                 "manufacturer": get_string_or_none(grab(processor, "manufacturer")),
-                # the socket is the stable module bay identity (independent of the installed model)
+                # the socket is the stable bay identity, independent of the installed model
                 "bay_name": socket,
                 "full_name": name,
-                # the CPU model is the module type (catalog) identifier when modeling as modules
                 "model": model,
                 "serial": get_string_or_none(grab(processor, "serial")),
                 "health": health_status,
@@ -668,8 +654,7 @@ class CheckRedfish(SourceBase):
 
             name = pd_name
 
-            # the drive slot (built from location/bay/id above) is the stable module bay identity,
-            # captured before the volatile type/model is appended to the display name
+            # the drive slot is the stable bay identity, captured before type/model is appended
             drive_bay = pd_name
 
             name_details = list()
@@ -694,6 +679,7 @@ class CheckRedfish(SourceBase):
             items.append({
                 "description": description,
                 "manufacturer": get_string_or_none(grab(pd, "manufacturer")),
+                "model": model,
                 "bay_name": drive_bay or "None",
                 "full_name": name or "None",
                 "serial": serial,
@@ -740,6 +726,7 @@ class CheckRedfish(SourceBase):
             items.append({
                 "description": description,
                 "manufacturer": get_string_or_none(grab(sc, "manufacturer")),
+                "model": model,
                 "full_name": name or "None",
                 "serial": get_string_or_none(grab(sc, "serial")),
                 "firmware": get_string_or_none(grab(sc, "firmware")),
@@ -774,6 +761,7 @@ class CheckRedfish(SourceBase):
 
             items.append({
                 "manufacturer": get_string_or_none(grab(se, "manufacturer")),
+                "model": model,
                 "full_name": name or "None",
                 "serial": get_string_or_none(grab(se, "serial")),
                 "firmware": get_string_or_none(grab(se, "firmware")),
@@ -828,22 +816,17 @@ class CheckRedfish(SourceBase):
 
             nic_type = NetBoxInterfaceType(name)
 
-            # the adapter id (e.g. NIC.Slot.1) is the stable physical-slot identity; adapter_name
-            # may embed a mutable human label that churns the bay across runs, so prefer the id
+            # the adapter id is the stable slot identity; adapter_name embeds a mutable label
             stable_bay_name = adapter_id or adapter_name or "None"
 
             if adapter_id is not None:
                 self.interface_adapter_type_dict[adapter_id] = nic_type
-                # remember which module bay this adapter's NIC module lives in so its ports
-                # can be attached to the module later
                 self.nic_module_bay_by_adapter_id[adapter_id] = stable_bay_name
 
             items.append({
                 "manufacturer": manufacturer,
-                # the adapter slot is the stable module bay identity (independent of the model)
                 "bay_name": stable_bay_name,
                 "full_name": name,
-                # the adapter model is the module type (catalog) identifier when modeling as modules
                 "model": model,
                 "serial": serial,
                 "part_number": get_string_or_none(grab(adapter, "part_number")),
@@ -931,16 +914,15 @@ class CheckRedfish(SourceBase):
             if wwn is not None:
                 discovered_int_list.append(wwn)
 
-            # if number of managers belonging to this port is not 0 then it's a BMC port
+            # a port belonging to a manager is a BMC port
             mgmt_only = len(manager_ids) > 0
 
-            # human-friendly label from redfish (e.g. "Integrated NIC 1 Port 1 Partition 1")
             friendly_name = port_name
             name_from_stable_id = False
 
             if self.use_modules() and mgmt_only is False and port_id is not None:
-                # name the NIC port by its stable redfish id (e.g. NIC.Integrated.1-1); the long
-                # descriptive label moves to the description instead of being part of the name
+                # the redfish id (e.g. NIC.Integrated.1-1) is stable; the long label moves to
+                # the description
                 port_name = port_id
                 name_from_stable_id = True
             elif port_name is not None:
@@ -981,7 +963,6 @@ class CheckRedfish(SourceBase):
                 "health": health_status
             }
 
-            # attach this interface to its parent module (NIC adapter / BMC) when modeling modules
             parent_module = self.interface_parent_module(adapter_id, mgmt_only)
             if parent_module is not None:
                 port_data_dict[port_name]["module"] = parent_module
@@ -1019,16 +1000,15 @@ class CheckRedfish(SourceBase):
             # get current object for this interface if it exists
             nic_object = data.get(port_name)
 
-            # detach a now-stale module link on an existing interface when no parent module
-            # resolves (modules off, or the parent module disappeared) so an enable -> disable
-            # transition clears the reference and a module prune can't cascade-delete a port we manage
+            # clear a stale link when no parent module resolves, so a module prune cannot
+            # cascade-delete a port this source still manages
             if nic_object is not None and "module" not in port_data:
                 nic_object.unset_attribute("module")
 
             # unset "illegal" attributes
             for attribute in ["inventory_type", "health"]:
                 if attribute in port_data:
-                    del(port_data[attribute])
+                    del (port_data[attribute])
 
             # del empty mac address attribute
             if port_data.get("mac_address") is None:
@@ -1041,7 +1021,7 @@ class CheckRedfish(SourceBase):
             # create or update interface with data
             if nic_object is not None:
                 if self.settings.overwrite_interface_name is False and port_data.get("name") is not None:
-                    del(port_data["name"])
+                    del (port_data["name"])
 
                 this_link_type = port_data.get("type")
                 mgmt_only = port_data.get("mgmt_only")
@@ -1059,9 +1039,7 @@ class CheckRedfish(SourceBase):
 
                 port_data = data_to_update
 
-            # Redfish only reliably reports the BMC IP, so never strip existing IPs from an interface
-            # we discovered no IPs for - host NIC / bond / bridge interfaces matched by a shared MAC
-            # (e.g. an OS pnet0/bond0 holding the management IP) must keep their IPs
+            # redfish only reliably reports the BMC IP, never the host NIC / bond / bridge IPs
             self.add_update_interface(nic_object, self.device_object, port_data,
                                       nic_ips.get(port_name, list()), keep_undiscovered_ips=True)
 
@@ -1090,6 +1068,7 @@ class CheckRedfish(SourceBase):
             items.append({
                 "description": description,
                 "full_name": name,
+                "model": model,
                 "manufacturer": grab(self.device_object, "data.device_type.data.manufacturer.data.name"),
                 "firmware": get_string_or_none(grab(manager, "firmware")),
                 "health": get_string_or_none(grab(manager, "health_status"))
@@ -1125,10 +1104,8 @@ class CheckRedfish(SourceBase):
         items: list
             a list of items to update
         inventory_type: str
-            the component type this batch describes (CPU, DIMM, Fan, ...). The caller passes it
-            instead of it being read back from the items, so an empty batch still says which
-            components it is about: those components are gone and must be marked absent. An empty
-            batch that returned early left them untouched, and untouched objects are orphan tagged.
+            the component type this batch is about (CPU, DIMM, Fan, ...), stated by the caller
+            so an empty batch still says which components are gone
 
         Returns
         -------
@@ -1138,8 +1115,7 @@ class CheckRedfish(SourceBase):
         if not isinstance(items, list):
             raise ValueError(f"Value for 'items' must be type 'list' got: {items}")
 
-        # the type identifies which of the device's components this batch is about and is also
-        # stored on each of them; stamp it here so lookup and stored value cannot drift apart
+        # stamp the type so the lookup value and the stored value cannot drift apart
         for item in items:
             item["inventory_type"] = inventory_type
 
@@ -1186,8 +1162,7 @@ class CheckRedfish(SourceBase):
                 if len(unmatched_inventory_items) > 0:
                     matched_inventory[nb_inventory_item] = unmatched_inventory_items.pop(0)
 
-                # the item is gone from the redfish inventory: say so. This is not conditional on
-                # the health actually changing - an object a run does not touch is orphan tagged.
+                # unconditional: an object a run does not touch is tagged orphaned
                 else:
                     nb_inventory_item.update(data={"custom_fields": {"health": "Absent"}}, source=self)
 
@@ -1311,9 +1286,7 @@ class CheckRedfish(SourceBase):
         # get current modules for this device and type, keyed by their module bay name
         current_modules = self.get_current_modules_by_bay_name(inventory_type)
 
-        # dict
-        #   key: NB module object
-        #   value: parsed data matching the exact module bay name
+        # NB module object -> parsed data matching its module bay name
         matched_modules = dict()
         unmatched_module_items = list()
 
@@ -1329,18 +1302,14 @@ class CheckRedfish(SourceBase):
         # sort unmatched items by module bay name for deterministic new-module creation order
         unmatched_module_items.sort(key=lambda x: self.module_bay_name(x) or "")
 
-        # the module bay is the authoritative physical slot and update_module never moves a module
-        # between bays, so matching must be strict by bay: a current module whose bay is not in the
-        # discovered set is a removed component (mark Absent), never a target to remap another
-        # component onto - unmatched incoming items create their own new bay/module below
+        # strict by bay: update_module never moves a module, so an unmatched current module is a
+        # removed component, not a target to remap another component onto
         for nb_module in current_modules.values():
 
             if nb_module in matched_modules:
                 continue
 
-            # the component is gone but its slot remains: record that on the module and keep both
-            # it and its bay registered with this source. Marking is not conditional on a value
-            # changing - an object a run does not touch is orphan tagged.
+            # unconditional: an object a run does not touch is tagged orphaned
             nb_module.update(data={"custom_fields": {"health": "Absent"}}, source=self)
             self.mark_module_bay_seen(nb_module)
 
@@ -1402,14 +1371,17 @@ class CheckRedfish(SourceBase):
         part_number = item_data.get("part_number")
 
         # the module type model is the catalog identifier of the part (e.g. the exact CPU model)
-        model = item_data.get("model") or part_number or item_data.get("full_name")
+        # a type is a catalog entry shared by identical parts. Without a model or part number
+        # the component class is the closest thing to one; the instance name would create a new
+        # type for every fan and drive in the fleet
+        model = item_data.get("model") or part_number or item_data.get("inventory_type") or \
+            item_data.get("full_name")
         module_type_data = {"model": model}
         if part_number is not None:
             module_type_data["part_number"] = part_number
 
-        # manufacturer is mandatory in NetBox. Prefer what redfish reports; otherwise reuse the
-        # manufacturer of an existing module type for this model (so a curated/previous value is
-        # not clobbered) and only fall back to the device vendor when creating a brand new type.
+        # NetBox requires a manufacturer: redfish, then the existing type's own value, then
+        # the device vendor
         manufacturer = item_data.get("manufacturer")
         if manufacturer is None:
             existing_module_type = self.inventory.get_by_data(NBModuleType, data={"model": model})
@@ -1556,8 +1528,8 @@ class CheckRedfish(SourceBase):
             "description": f"Marks objects synced from check_redfish inventory '{self.name}' to this NetBox Instance."
         })
 
-        # discovered components are stored either as modules (NetBox >= 4.3) or as the
-        # deprecated inventory items, so the related custom fields need to follow that choice
+        # components are stored as modules (NetBox >= 4.3) or as the deprecated inventory items,
+        # so their custom fields must follow that choice
         component_object_type = "dcim.module" if self.use_modules() is True else "dcim.inventoryitem"
 
         self.add_update_custom_field({

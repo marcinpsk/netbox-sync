@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#  Copyright (c) 2020 - 2026 Ricardo Bartels. All rights reserved.
+#  Copyright (c) 2020 - 2026 netbox-sync team. All rights reserved.
 #
 #  netbox-sync.py
 #
@@ -13,7 +13,7 @@ VERSION_DATA_FILE="module/__init__.py"
 README_FILE="README.md"
 PYPROJECT_TOML="pyproject.toml"
 VERSION_TO_SET="$1"
-COPYRIGHT_PATTERN="#  Copyright (c) 2020 - 2026 Ricardo Bartels. All rights reserved."
+COPYRIGHT_PATTERN="#  Copyright (c) 2020 - 2026 netbox-sync team. All rights reserved."
 
 BASE_PATH="$(realpath "$(dirname "${0}")/..")"
 # shellcheck disable=SC2181

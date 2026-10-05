@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#  Copyright (c) 2020 - 2026 Ricardo Bartels. All rights reserved.
+#  Copyright (c) 2020 - 2026 netbox-sync team. All rights reserved.
 #
 #  netbox-sync.py
 #
@@ -30,8 +30,15 @@ class PermittedSubnets:
             log.info(f"Config option 'permitted_subnets' is undefined. No IP addresses will be populated to NetBox!")
             return
 
+        # a yaml config may define the subnets as a list instead of a comma separated string
+        if isinstance(config_string, list):
+            config_string = ", ".join(str(x) for x in config_string)
+
         if not isinstance(config_string, str):
-            raise ValueError("permitted subnets need to be of type string")
+            log.error(f"permitted subnets need to be a comma separated string or a list, "
+                      f"got {type(config_string).__name__}: {config_string}")
+            self._validation_failed = True
+            return
 
         subnet_list = [x.strip() for x in config_string.split(",") if x.strip() != ""]
 

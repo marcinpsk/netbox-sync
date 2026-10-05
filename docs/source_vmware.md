@@ -107,3 +107,99 @@ Primary IPv4/6 will be determined by interface that provides the default route f
 
 **Note:**<br>
 IP address information can only be extracted if guest tools are installed and running.
+
+#### 6. Sync VMware Tools guest hostname to a custom field
+
+The vCenter VM name (used as the NetBox VM `name`) and the hostname reported from inside the
+guest OS by VMware Tools are not always identical. This can happen if:
+* a VM was renamed in vCenter but the OS hostname was not changed (or vice versa)
+* an OS administrator changed the hostname without informing the virtualization team
+* a VM was cloned and the guest hostname was not adjusted afterwards
+
+To make this drift visible in NetBox, the option `vm_guest_hostname_custom_field` can be set to
+the name of a NetBox custom field. If set, the guest hostname reported by VMware Tools (vCenter
+property `guest.hostName`) is synced into that custom field on every synced VM, while the NetBox
+VM `name` keeps reflecting the vCenter inventory name unchanged. This allows administrators to
+compare the NetBox VM name against the custom field value on the same VM record to spot naming
+drift.
+
+```ini
+vm_guest_hostname_custom_field = vmware_guest_hostname
+```
+
+If the custom field does not exist in NetBox yet it will be created automatically (type `Text`,
+assigned to the `Virtual Machine` object type), the same way other custom fields managed by
+netbox-sync (e.g. `vcsa_*` custom attributes) are created. An administrator can also pre-create
+the field beforehand; netbox-sync will then just use the existing field.
+
+This option is unset by default, so the feature is disabled and no additional custom field is
+created unless explicitly configured.
+
+VMware Tools may not always report a hostname, for example if Tools are not installed, not
+running, outdated, or simply have not reported guest information yet. In that case
+netbox-sync leaves the custom field untouched and keeps the last known value, instead of
+clearing it. A message is logged at debug level (`-l DEBUG2`) whenever this happens.
+
+Example result in NetBox for a VM named `APPPRD01` in vCenter whose guest OS reports
+`appprd01.corp.example.com` as its hostname:
+
+```text
+Virtual Machine Name:        APPPRD01
+Custom Fields:
+  VMware Guest Hostname:     appprd01.corp.example.com
+```
+
+### Cables to CDP/LLDP neighbors
+
+An ESXi host reports the switch and the switch port each of its physical interfaces (pNICs) is
+connected to, if CDP or LLDP is enabled on the switch. With the option `sync_host_cables` enabled
+netbox-sync uses this information to create cables in NetBox between the host interface and the
+switch port.
+
+```ini
+sync_host_cables = True
+```
+
+Cables are objects which are usually maintained by hand, that's why this option is disabled by
+default. With the option disabled no cable is read from or written to NetBox at all. NetBox 3.3 or
+newer is needed, on older versions the option is ignored.
+
+netbox-sync only connects things it can find, it never creates the other end of a cable:
+
+* the device the neighbor reports as its system name must already exist in NetBox. The name is
+  matched exactly first, a short name is only matched against a FQDN if that match is unambiguous
+* the port the neighbor reports must already exist as an interface of that device. Long and short
+  interface names are matched against each other, so a reported `FastEthernet0/16` also matches an
+  interface named `Fa0/16` in NetBox. CDP reports the port ID, LLDP additionally reports a port
+  description and both are tried
+* both interfaces must already exist in NetBox. An interface which was just discovered gets its
+  cable during the next run
+* neither of the two interfaces may be connected already. A cable which was created by hand or which
+  connects to a different port is never changed or deleted, it is reported at log level `DEBUG`
+  instead
+
+Cables created by this source are tagged like every other object and are marked as orphaned and
+pruned once the host stops reporting that neighbor (see `prune_enabled`). Disabling the option again
+leaves all previously created cables untouched in NetBox.
+
+### Filtering VM Disk Information
+VM disks are synchronized between vCenter and NetBox. Since NetBox 3.7.0, virtual disks are tracked as separate objects 
+linked to VMs. In some scenarios, such as when temporary disks are attached to VMs during backup operations 
+(e.g., "Independent-nonpersistent" disks from Veeam), you might want to exclude these changes from synchronization 
+to avoid cluttering your NetBox change log.
+
+You can use the following filter options to exclude disk synchronization for specific VMs:
+
+1. **`vm_exclude_disk_sync`**: A regex pattern matching VM names where disk synchronization should be excluded.
+   ```ini
+   vm_exclude_disk_sync = backup-.*, veeam-.*
+   ```
+
+2. **`vm_exclude_disk_sync_by_tag`**: A comma-separated list of vCenter tags. VMs with any of these tags will have 
+   their disk information excluded from synchronization.
+   ```ini
+   vm_exclude_disk_sync_by_tag = backup-vm, veeam-job
+   ```
+
+When a VM matches these filters, it will still be synchronized to NetBox with all its other information 
+(CPU, memory, interfaces, IP addresses, etc.), but changes to disk information will be ignored.
