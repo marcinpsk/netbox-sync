@@ -88,6 +88,9 @@ def test_plain_string_location_is_still_used(check_redfish_source):
     "{'Oem': {'Dell': {}}}",
     "['a', 'b']",
     "{'a': 1}",
+    "('a', 'b')",
+    "()",
+    "set()",
     {"Oem": {"Dell": {}}},
     ["a", "b"],
 ])
@@ -101,6 +104,9 @@ def test_serialized_structures_are_rejected(value):
     ("{unresolved}", "{unresolved}"),      # not a literal, so not a structure
     ("{", "{"),
     ("Bay {3}", "Bay {3}"),
+    ("(Front)", "(Front)"),                # not a literal, so not a structure
+    ("(3)", "(3)"),                        # a parenthesized number, not a tuple
+    ("set(a)", "set(a)"),
     (5, "5"),
     (0, "0"),
     ("", None),

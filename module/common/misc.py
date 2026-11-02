@@ -201,7 +201,7 @@ def get_name_part_or_none(text=None):
 
     value = get_string_or_none(text)
 
-    if value is None or value[:1] not in ("{", "["):
+    if value is None or (value[:1] not in ("{", "[", "(") and value != "set()"):
         return value
 
     # only a value which really parses as a structure is rejected, so a name which
